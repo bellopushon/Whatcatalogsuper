@@ -195,19 +195,19 @@ Deno.serve(async (req: Request) => {
     const oldPlanId = currentUser.plan;
 
     // Step 3: Update user plan in database
-    const updateResponse = await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${userId}`, {
-      method: 'PATCH',
-      headers: {
-        'Authorization': `Bearer ${serviceRoleKey}`,
-        'apikey': serviceRoleKey,
-        'Content-Type': 'application/json',
-        'Prefer': 'return=representation'
-      },
-      body: JSON.stringify({
-        plan: newPlanId,
-        updated_at: new Date().toISOString()
-      })
-    });
+const updateResponse = await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${userId}`, {
+  method: 'PATCH',
+  headers: {
+    'Authorization': `Bearer ${serviceRoleKey}`,
+    'apikey': serviceRoleKey,
+    'Content-Type': 'application/json',
+    'Prefer': 'return=representation'
+  },
+  body: JSON.stringify({
+    plan: newPlanId,
+    updated_at: new Date().toISOString()
+  })
+});
 
     if (!updateResponse.ok) {
       const updateError = await updateResponse.json();
