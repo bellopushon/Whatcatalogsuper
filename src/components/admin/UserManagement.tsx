@@ -25,7 +25,9 @@ import {
   X,
   Edit,
   AlertTriangle,
-  Wrench
+  Wrench,
+  CreditCard,
+  ExternalLink
 } from 'lucide-react';
 import { useSuperAdmin } from '../../contexts/SuperAdminContext';
 import { useToast } from '../../contexts/ToastContext';
@@ -53,7 +55,15 @@ interface EditUserForm {
 }
 
 export default function UserManagement() {
-  const { state, updateUserPlan, toggleUserStatus, loadUsers, createUser, updateUser, fixUserStripeCustomer } = useSuperAdmin();
+  const { 
+    state, 
+    updateUserPlan, 
+    toggleUserStatus, 
+    loadUsers, 
+    createUser, 
+    updateUser, 
+    fixUserStripeCustomer 
+  } = useSuperAdmin();
   const { success, error } = useToast();
   const [searchTerm, setSearchTerm] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -66,6 +76,7 @@ export default function UserManagement() {
   const [selectedPlanFilter, setSelectedPlanFilter] = useState('all');
   const [selectedStatusFilter, setSelectedStatusFilter] = useState('all');
   const [fixingUser, setFixingUser] = useState<string | null>(null);
+  const [openingPortal, setOpeningPortal] = useState<string | null>(null);
   
   // Pagination
   const [currentPage, setCurrentPage] = useState(1);
@@ -139,7 +150,7 @@ export default function UserManagement() {
     const rect = buttonElement.getBoundingClientRect();
     const viewportHeight = window.innerHeight;
     const viewportWidth = window.innerWidth;
-    const dropdownHeight = 250; // Increased for new fix option
+    const dropdownHeight = 300; // Increased for new portal option
     const dropdownWidth = 200;
     
     let position: { top?: number; bottom?: number; left?: number; right?: number } = {};
@@ -262,6 +273,44 @@ export default function UserManagement() {
       error('Error al corregir usuario', err.message || 'No se pudo corregir la información de Stripe');
     } finally {
       setFixingUser(null);
+    }
+  };
+
+  const handleOpenStripePortal = async (userId: string) => {
+    setOpeningPortal(userId);
+    try {
+      const user = state.users.find(u => u.id === userId);
+      if (!user) {
+        throw new Error('Usuario no encontrado');
+      }
+
+      const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/create-customer-portal-session`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('supabase.auth.token')}`
+        },
+        body: JSON.stringify({
+          userId: userId,
+          returnUrl: window.location.href
+        })
+      });
+
+      const data = await response.json();
+      
+      if (data.success) {
+        // Open Stripe portal in new tab
+        window.open(data.url, '_blank');
+        setOpenDropdown(null);
+        success('Portal abierto', 'Se ha abierto el portal de Stripe en una nueva pestaña');
+      } else {
+        throw new Error(data.error || 'Error al crear sesión del portal');
+      }
+    } catch (err: any) {
+      console.error('Error opening Stripe portal:', err);
+      error('Error al abrir portal', err.message || 'No se pudo abrir el portal de Stripe');
+    } finally {
+      setOpeningPortal(null);
     }
   };
 
@@ -571,6 +620,11 @@ export default function UserManagement() {
     return userPlan && !userPlan.isFree && !user.stripeCustomerId;
   };
 
+  const canOpenStripePortal = (user: any) => {
+    const userPlan = state.plans.find(p => p.id === user.plan);
+    return userPlan && !userPlan.isFree && user.stripeCustomerId && state.stripeConfig;
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Compact Mobile Header */}
@@ -693,6 +747,9 @@ export default function UserManagement() {
                         {needsStripeCustomerFix(user) && (
                           <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0" title="Necesita corrección de Stripe" />
                         )}
+                        {canOpenStripePortal(user) && (
+                          <CreditCard className="w-4 h-4 text-blue-500 flex-shrink-0" title="Puede acceder al portal de Stripe" />
+                        )}
                       </div>
                       
                       <div className="flex items-center gap-2 mb-2">
@@ -764,6 +821,9 @@ export default function UserManagement() {
                           )}
                           {needsStripeCustomerFix(user) && (
                             <AlertTriangle className="w-4 h-4 text-amber-500" title="Necesita corrección de Stripe" />
+                          )}
+                          {canOpenStripePortal(user) && (
+                            <CreditCard className="w-4 h-4 text-blue-500" title="Puede acceder al portal de Stripe" />
                           )}
                         </div>
                         <p className="text-sm text-gray-500 truncate">{user.email}</p>
@@ -874,6 +934,22 @@ export default function UserManagement() {
             <Edit className="w-4 h-4" />
             Editar Usuario
           </button>
+
+          {/* Stripe Portal option */}
+          {(() => {
+            const user = state.users.find(u => u.id === openDropdown);
+            return user && canOpenStripePortal(user) && (
+              <button
+                onClick={() => handleOpenStripePortal(openDropdown)}
+                disabled={openingPortal === openDropdown}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-blue-700 hover:bg-blue-50 transition-colors disabled:opacity-50"
+              >
+                <CreditCard className={`w-4 h-4 ${openingPortal === openDropdown ? 'animate-pulse' : ''}`} />
+                <span className="flex-1">Portal de Stripe</span>
+                <ExternalLink className="w-3 h-3" />
+              </button>
+            );
+          })()}
 
           {/* Fix Stripe Customer option */}
           {(() => {
