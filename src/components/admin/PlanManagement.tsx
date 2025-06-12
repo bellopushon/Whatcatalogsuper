@@ -1,29 +1,5 @@
 import React, { useState } from 'react';
-import { 
-  Plus, 
-  Edit, 
-  Trash2, 
-  Check, 
-  X, 
-  Crown,
-  RefreshCw,
-  DollarSign,
-  Users,
-  Store,
-  Package,
-  Save,
-  AlertTriangle,
-  Star,
-  Shield,
-  Zap,
-  Target,
-  Link,
-  ExternalLink,
-  Sync,
-  CheckCircle,
-  XCircle,
-  AlertCircle
-} from 'lucide-react';
+import { Plus, Edit, Trash2, Check, X, Crown, RefreshCw, DollarSign, Users, Store, Package, Save, AlertTriangle, Star, Shield, Zap, Target, Link, ExternalLink, FolderSync as Sync, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
 import { useSuperAdmin } from '../../contexts/SuperAdminContext';
 import { useToast } from '../../contexts/ToastContext';
 
