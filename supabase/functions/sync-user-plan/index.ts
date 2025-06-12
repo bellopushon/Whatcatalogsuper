@@ -119,10 +119,13 @@ Deno.serve(async (req: Request) => {
     console.log(`🔄 Updating user plan: ${userId} -> ${newPlanId}`);
 
     // Step 1: Verify the plan exists
-    const { data: plans, error: planError } = await supabaseAdmin
-      .rpc('get_plan_by_id', { plan_id: newPlanId });
+    const { data: planData, error: planError } = await supabaseAdmin
+      .from('plans')
+      .select('*')
+      .eq('id', newPlanId)
+      .single();
 
-    if (planError || !plans || plans.length === 0) {
+    if (planError || !planData) {
       console.error('Plan verification failed:', planError);
       return new Response(
         JSON.stringify({ 
@@ -136,13 +139,14 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const planData = plans[0];
-
     // Step 2: Get current user data
-    const { data: currentUser, error: userError } = await supabaseAdmin
-      .rpc('get_user_by_id', { user_id: userId });
+    const { data: userData, error: userError } = await supabaseAdmin
+      .from('users')
+      .select('*')
+      .eq('id', userId)
+      .single();
 
-    if (userError || !currentUser || currentUser.length === 0) {
+    if (userError || !userData) {
       console.error('User fetch failed:', userError);
       return new Response(
         JSON.stringify({ 
@@ -156,15 +160,15 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const userData = currentUser[0];
     const oldPlanId = userData.plan;
 
     // Step 3: Update user plan
     const { data: updatedUser, error: updateError } = await supabaseAdmin
-      .rpc('update_user_plan', { 
-        user_id: userId, 
-        new_plan_id: newPlanId 
-      });
+      .from('users')
+      .update({ plan: planData.name })
+      .eq('id', userId)
+      .select()
+      .single();
 
     if (updateError) {
       console.error('Error updating user plan:', updateError);
@@ -182,7 +186,8 @@ Deno.serve(async (req: Request) => {
 
     // Step 4: Log the action in system_logs
     const { error: logError } = await supabaseAdmin
-      .rpc('insert_system_log', {
+      .from('system_logs')
+      .insert({
         admin_id: adminId || user.id,
         action: 'update_user_plan',
         object_type: 'user',
@@ -206,7 +211,7 @@ Deno.serve(async (req: Request) => {
     return new Response(
       JSON.stringify({
         success: true,
-        user: updatedUser[0],
+        user: updatedUser,
         plan: planData,
         message: `Plan actualizado a ${planData.name}`,
         changes: {
