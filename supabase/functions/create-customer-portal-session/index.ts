@@ -352,11 +352,15 @@ Deno.serve(async (req: Request) => {
 
   } catch (error) {
     console.error('❌ Portal creation error:', error);
+    
+    // Ensure we always return a meaningful error message
+    const errorMessage = error?.message || error?.toString() || 'Error interno del servidor al crear la sesión del portal';
+    
     return new Response(
       JSON.stringify({ 
         success: false,
-        error: 'Internal server error',
-        details: error.message
+        error: errorMessage,
+        details: error?.stack || 'No stack trace available'
       }),
       { 
         status: 500, 
