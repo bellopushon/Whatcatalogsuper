@@ -1,3 +1,5 @@
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.3'
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -46,6 +48,14 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    // Create Supabase admin client
+    const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false
+      }
+    });
+
     // Verify super admin authentication
     const authHeader = req.headers.get('Authorization');
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -64,14 +74,9 @@ Deno.serve(async (req: Request) => {
     const token = authHeader.replace('Bearer ', '');
     
     // Verify the JWT token
-    const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'apikey': serviceRoleKey,
-      }
-    });
+    const { data: { user }, error: authError } = await supabaseAdmin.auth.getUser(token);
 
-    if (!userResponse.ok) {
+    if (authError || !user) {
       return new Response(
         JSON.stringify({ 
           error: 'Token de autenticación inválido',
@@ -83,8 +88,6 @@ Deno.serve(async (req: Request) => {
         }
       );
     }
-
-    const user = await userResponse.json();
     
     if (user.email !== SUPER_ADMIN_EMAIL) {
       return new Response(
@@ -148,32 +151,13 @@ Deno.serve(async (req: Request) => {
     console.log(`🔄 Creating user: ${userData.email}`);
 
     // Step 1: Verify the plan exists
-    const planResponse = await fetch(
-      `${supabaseUrl}/rest/v1/plans?select=*&id=eq.${userData.plan}`,
-      {
-        headers: {
-          'apikey': serviceRoleKey,
-          'Authorization': `Bearer ${serviceRoleKey}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
+    const { data: plans, error: planError } = await supabaseAdmin
+      .from('plans')
+      .select('*')
+      .eq('id', userData.plan)
+      .single();
 
-    if (!planResponse.ok) {
-      return new Response(
-        JSON.stringify({ 
-          error: 'Error al verificar el plan',
-          code: 'PLAN_VERIFICATION_FAILED'
-        }),
-        { 
-          status: 500, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-        }
-      );
-    }
-
-    const plans = await planResponse.json();
-    if (!plans || plans.length === 0) {
+    if (planError || !plans) {
       return new Response(
         JSON.stringify({ 
           error: `Plan con ID ${userData.plan} no encontrado`,
@@ -187,57 +171,39 @@ Deno.serve(async (req: Request) => {
     }
 
     // Step 2: Check if email already exists
-    const existingUserResponse = await fetch(
-      `${supabaseUrl}/rest/v1/users?select=id&email=eq.${userData.email}`,
-      {
-        headers: {
-          'apikey': serviceRoleKey,
-          'Authorization': `Bearer ${serviceRoleKey}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
+    const { data: existingUsers, error: existingError } = await supabaseAdmin
+      .from('users')
+      .select('id')
+      .eq('email', userData.email);
 
-    if (existingUserResponse.ok) {
-      const existingUsers = await existingUserResponse.json();
-      if (existingUsers && existingUsers.length > 0) {
-        return new Response(
-          JSON.stringify({ 
-            error: 'Este email ya está registrado',
-            code: 'EMAIL_ALREADY_EXISTS'
-          }),
-          { 
-            status: 400, 
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-          }
-        );
-      }
+    if (!existingError && existingUsers && existingUsers.length > 0) {
+      return new Response(
+        JSON.stringify({ 
+          error: 'Este email ya está registrado',
+          code: 'EMAIL_ALREADY_EXISTS'
+        }),
+        { 
+          status: 400, 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        }
+      );
     }
 
     // Step 3: Create user in Supabase Auth
-    const authCreateResponse = await fetch(`${supabaseUrl}/auth/v1/admin/users`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${serviceRoleKey}`,
-        'apikey': serviceRoleKey,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        email: userData.email,
-        password: userData.password,
-        email_confirm: true,
-        user_metadata: {
-          name: userData.name
-        }
-      })
+    const { data: authData, error: authCreateError } = await supabaseAdmin.auth.admin.createUser({
+      email: userData.email,
+      password: userData.password,
+      email_confirm: true,
+      user_metadata: {
+        name: userData.name
+      }
     });
 
-    if (!authCreateResponse.ok) {
-      const authError = await authCreateResponse.json();
-      console.error('Error creating user in Auth:', authError);
+    if (authCreateError) {
+      console.error('Error creating user in Auth:', authCreateError);
       return new Response(
         JSON.stringify({ 
-          error: authError.message || 'Error al crear usuario en autenticación',
+          error: authCreateError.message || 'Error al crear usuario en autenticación',
           code: 'AUTH_CREATE_FAILED'
         }),
         { 
@@ -247,19 +213,12 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const authData = await authCreateResponse.json();
-    const userId = authData.id;
+    const userId = authData.user.id;
 
     // Step 4: Create user record in users table
-    const dbCreateResponse = await fetch(`${supabaseUrl}/rest/v1/users`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${serviceRoleKey}`,
-        'apikey': serviceRoleKey,
-        'Content-Type': 'application/json',
-        'Prefer': 'return=representation'
-      },
-      body: JSON.stringify({
+    const { data: newUser, error: dbCreateError } = await supabaseAdmin
+      .from('users')
+      .insert({
         id: userId,
         email: userData.email,
         name: userData.name,
@@ -271,23 +230,17 @@ Deno.serve(async (req: Request) => {
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       })
-    });
+      .select()
+      .single();
 
-    if (!dbCreateResponse.ok) {
+    if (dbCreateError) {
       // If database insert fails, delete the auth user
-      await fetch(`${supabaseUrl}/auth/v1/admin/users/${userId}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${serviceRoleKey}`,
-          'apikey': serviceRoleKey
-        }
-      });
+      await supabaseAdmin.auth.admin.deleteUser(userId);
 
-      const dbError = await dbCreateResponse.json();
-      console.error('Error creating user in database:', dbError);
+      console.error('Error creating user in database:', dbCreateError);
       return new Response(
         JSON.stringify({ 
-          error: dbError.message || 'Error al crear usuario en base de datos',
+          error: dbCreateError.message || 'Error al crear usuario en base de datos',
           code: 'DB_CREATE_FAILED'
         }),
         { 
@@ -297,18 +250,10 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const newUser = await dbCreateResponse.json();
-    const createdUser = Array.isArray(newUser) ? newUser[0] : newUser;
-
     // Step 5: Log the action in system_logs
-    const logResponse = await fetch(`${supabaseUrl}/rest/v1/system_logs`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${serviceRoleKey}`,
-        'apikey': serviceRoleKey,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
+    const { error: logError } = await supabaseAdmin
+      .from('system_logs')
+      .insert({
         admin_id: userData.adminId || user.id,
         action: 'create_user',
         object_type: 'user',
@@ -321,10 +266,9 @@ Deno.serve(async (req: Request) => {
           timestamp: new Date().toISOString()
         },
         ip_address: req.headers.get('x-forwarded-for') || 'unknown'
-      })
-    });
+      });
 
-    if (!logResponse.ok) {
+    if (logError) {
       console.warn('Failed to log action, but continuing...');
     }
 
@@ -334,17 +278,17 @@ Deno.serve(async (req: Request) => {
       JSON.stringify({
         success: true,
         user: {
-          id: createdUser.id,
-          email: createdUser.email,
-          name: createdUser.name,
-          phone: createdUser.phone,
-          company: createdUser.company,
-          location: createdUser.location,
-          plan: createdUser.plan,
-          isActive: createdUser.is_active,
-          isSuperAdmin: createdUser.email === SUPER_ADMIN_EMAIL,
-          createdAt: createdUser.created_at,
-          updatedAt: createdUser.updated_at
+          id: newUser.id,
+          email: newUser.email,
+          name: newUser.name,
+          phone: newUser.phone,
+          company: newUser.company,
+          location: newUser.location,
+          plan: newUser.plan,
+          isActive: newUser.is_active,
+          isSuperAdmin: newUser.email === SUPER_ADMIN_EMAIL,
+          createdAt: newUser.created_at,
+          updatedAt: newUser.updated_at
         },
         message: 'Usuario creado exitosamente'
       }),

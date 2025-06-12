@@ -1,3 +1,5 @@
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.3'
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -27,7 +29,10 @@ Deno.serve(async (req: Request) => {
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
 
     if (!supabaseUrl || !serviceRoleKey) {
-      console.error('Missing environment variables');
+      console.error('Missing environment variables:', { 
+        hasUrl: !!supabaseUrl, 
+        hasServiceKey: !!serviceRoleKey 
+      });
       return new Response(
         JSON.stringify({ 
           error: 'Configuración del servidor incompleta',
@@ -39,6 +44,14 @@ Deno.serve(async (req: Request) => {
         }
       );
     }
+
+    // Create Supabase admin client
+    const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false
+      }
+    });
 
     // Verify super admin authentication
     const authHeader = req.headers.get('Authorization');
@@ -58,14 +71,10 @@ Deno.serve(async (req: Request) => {
     const token = authHeader.replace('Bearer ', '');
     
     // Verify the JWT token
-    const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'apikey': serviceRoleKey,
-      }
-    });
+    const { data: { user }, error: authError } = await supabaseAdmin.auth.getUser(token);
 
-    if (!userResponse.ok) {
+    if (authError || !user) {
+      console.error('Auth verification failed:', authError);
       return new Response(
         JSON.stringify({ 
           error: 'Token de autenticación inválido',
@@ -77,8 +86,6 @@ Deno.serve(async (req: Request) => {
         }
       );
     }
-
-    const user = await userResponse.json();
     
     if (user.email !== SUPER_ADMIN_EMAIL) {
       return new Response(
@@ -112,32 +119,14 @@ Deno.serve(async (req: Request) => {
     console.log(`🔄 Updating user plan: ${userId} -> ${newPlanId}`);
 
     // Step 1: Verify the plan exists
-    const planResponse = await fetch(
-      `${supabaseUrl}/rest/v1/plans?select=*&id=eq.${newPlanId}`,
-      {
-        headers: {
-          'apikey': serviceRoleKey,
-          'Authorization': `Bearer ${serviceRoleKey}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
+    const { data: plans, error: planError } = await supabaseAdmin
+      .from('plans')
+      .select('*')
+      .eq('id', newPlanId)
+      .single();
 
-    if (!planResponse.ok) {
-      return new Response(
-        JSON.stringify({ 
-          error: 'Error al verificar el plan',
-          code: 'PLAN_VERIFICATION_FAILED'
-        }),
-        { 
-          status: 500, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-        }
-      );
-    }
-
-    const plans = await planResponse.json();
-    if (!plans || plans.length === 0) {
+    if (planError || !plans) {
+      console.error('Plan verification failed:', planError);
       return new Response(
         JSON.stringify({ 
           error: `Plan con ID ${newPlanId} no encontrado`,
@@ -150,35 +139,15 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const plan = plans[0];
-
     // Step 2: Get current user data
-    const userDataResponse = await fetch(
-      `${supabaseUrl}/rest/v1/users?select=*&id=eq.${userId}`,
-      {
-        headers: {
-          'apikey': serviceRoleKey,
-          'Authorization': `Bearer ${serviceRoleKey}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
+    const { data: currentUser, error: userError } = await supabaseAdmin
+      .from('users')
+      .select('*')
+      .eq('id', userId)
+      .single();
 
-    if (!userDataResponse.ok) {
-      return new Response(
-        JSON.stringify({ 
-          error: 'Error al obtener datos del usuario',
-          code: 'USER_FETCH_FAILED'
-        }),
-        { 
-          status: 500, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-        }
-      );
-    }
-
-    const users = await userDataResponse.json();
-    if (!users || users.length === 0) {
+    if (userError || !currentUser) {
+      console.error('User fetch failed:', userError);
       return new Response(
         JSON.stringify({ 
           error: `Usuario con ID ${userId} no encontrado`,
@@ -191,26 +160,20 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const currentUser = users[0];
     const oldPlanId = currentUser.plan;
 
     // Step 3: Update user plan in database
-const updateResponse = await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${userId}`, {
-  method: 'PATCH',
-  headers: {
-    'Authorization': `Bearer ${serviceRoleKey}`,
-    'apikey': serviceRoleKey,
-    'Content-Type': 'application/json',
-    'Prefer': 'return=representation'
-  },
-  body: JSON.stringify({
-    plan: newPlanId,
-    updated_at: new Date().toISOString()
-  })
-});
+    const { data: updatedUser, error: updateError } = await supabaseAdmin
+      .from('users')
+      .update({
+        plan: newPlanId,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', userId)
+      .select()
+      .single();
 
-    if (!updateResponse.ok) {
-      const updateError = await updateResponse.json();
+    if (updateError) {
       console.error('Error updating user plan:', updateError);
       return new Response(
         JSON.stringify({ 
@@ -224,17 +187,10 @@ const updateResponse = await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${userId}
       );
     }
 
-    const updatedUser = await updateResponse.json();
-
     // Step 4: Log the action in system_logs
-    const logResponse = await fetch(`${supabaseUrl}/rest/v1/system_logs`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${serviceRoleKey}`,
-        'apikey': serviceRoleKey,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
+    const { error: logError } = await supabaseAdmin
+      .from('system_logs')
+      .insert({
         admin_id: adminId || user.id,
         action: 'update_user_plan',
         object_type: 'user',
@@ -242,16 +198,15 @@ const updateResponse = await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${userId}
         details: {
           oldPlanId,
           newPlanId,
-          oldPlanName: 'Unknown', // We could fetch this if needed
-          newPlanName: plan.name,
+          oldPlanName: 'Unknown',
+          newPlanName: plans.name,
           timestamp: new Date().toISOString()
         },
         ip_address: req.headers.get('x-forwarded-for') || 'unknown'
-      })
-    });
+      });
 
-    if (!logResponse.ok) {
-      console.warn('Failed to log action, but continuing...');
+    if (logError) {
+      console.warn('Failed to log action:', logError);
     }
 
     console.log(`✅ User plan updated successfully: ${userId} -> ${newPlanId}`);
@@ -259,13 +214,13 @@ const updateResponse = await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${userId}
     return new Response(
       JSON.stringify({
         success: true,
-        user: Array.isArray(updatedUser) ? updatedUser[0] : updatedUser,
-        plan: plan,
-        message: `Plan actualizado a ${plan.name}`,
+        user: updatedUser,
+        plan: plans,
+        message: `Plan actualizado a ${plans.name}`,
         changes: {
           oldPlanId,
           newPlanId,
-          planName: plan.name
+          planName: plans.name
         }
       }),
       { 

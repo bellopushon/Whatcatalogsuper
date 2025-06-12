@@ -1,3 +1,5 @@
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.3'
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -8,7 +10,7 @@ const corsHeaders = {
 const SUPER_ADMIN_EMAIL = 'the.genio27@gmail.com';
 
 // Helper function to verify super admin
-async function verifySuperAdmin(authHeader: string | null, supabaseUrl: string, serviceRoleKey: string) {
+async function verifySuperAdmin(authHeader: string | null, supabaseAdmin: any) {
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     throw new Error('Missing or invalid authorization header');
   }
@@ -16,18 +18,11 @@ async function verifySuperAdmin(authHeader: string | null, supabaseUrl: string, 
   const token = authHeader.replace('Bearer ', '');
   
   // Verify the JWT token
-  const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'apikey': serviceRoleKey,
-    }
-  });
+  const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
 
-  if (!response.ok) {
+  if (error || !user) {
     throw new Error('Invalid authentication token');
   }
-
-  const user = await response.json();
   
   if (user.email !== SUPER_ADMIN_EMAIL) {
     throw new Error('Access denied: Super admin privileges required');
@@ -66,10 +61,18 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    // Create Supabase admin client
+    const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false
+      }
+    });
+
     // Verify super admin for all operations
     const authHeader = req.headers.get('Authorization');
     try {
-      await verifySuperAdmin(authHeader, supabaseUrl, serviceRoleKey);
+      await verifySuperAdmin(authHeader, supabaseAdmin);
     } catch (error) {
       console.error('Super admin verification failed:', error.message);
       return new Response(
@@ -86,32 +89,19 @@ Deno.serve(async (req: Request) => {
 
     // Handle GET request - fetch all users
     if (req.method === 'GET') {
-      console.log('🔄 Fetching users with service role...');
-      const response = await fetch(
-        `${supabaseUrl}/rest/v1/users?select=*&order=created_at.desc`,
-        {
-          headers: {
-            'apikey': serviceRoleKey,
-            'Authorization': `Bearer ${serviceRoleKey}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
+      console.log('🔄 Fetching users...');
+      const { data: users, error } = await supabaseAdmin
+        .from('users')
+        .select('*')
+        .order('created_at', { ascending: false });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error('Error fetching users:', {
-          status: response.status,
-          statusText: response.statusText,
-          body: errorText
-        });
-        
+      if (error) {
+        console.error('Error fetching users:', error);
         return new Response(
           JSON.stringify({ 
             error: 'Error al obtener usuarios de la base de datos',
             code: 'USERS_FETCH_FAILED',
-            details: `HTTP ${response.status}: ${response.statusText}`,
-            body: errorText
+            details: error.message
           }),
           { 
             status: 500, 
@@ -120,8 +110,7 @@ Deno.serve(async (req: Request) => {
         );
       }
 
-      const users = await response.json();
-      console.log(`✅ Successfully fetched ${users?.length || 0} users via service role`);
+      console.log(`✅ Successfully fetched ${users?.length || 0} users`);
 
       // Agregar información adicional a cada usuario
       const enrichedUsers = (users || []).map((user: any) => ({
@@ -149,26 +138,17 @@ Deno.serve(async (req: Request) => {
       const userData = await req.json();
       console.log('🔄 Creating new user:', userData.email);
 
-      // Create user in Supabase Auth using service role
-      const authResponse = await fetch(`${supabaseUrl}/auth/v1/admin/users`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${serviceRoleKey}`,
-          'apikey': serviceRoleKey,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          email: userData.email,
-          password: userData.password,
-          email_confirm: true,
-          user_metadata: {
-            name: userData.name
-          }
-        })
+      // Create user in Supabase Auth using admin client
+      const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
+        email: userData.email,
+        password: userData.password,
+        email_confirm: true,
+        user_metadata: {
+          name: userData.name
+        }
       });
 
-      if (!authResponse.ok) {
-        const authError = await authResponse.json();
+      if (authError) {
         console.error('Error creating user in Auth:', authError);
         return new Response(
           JSON.stringify({ 
@@ -182,19 +162,12 @@ Deno.serve(async (req: Request) => {
         );
       }
 
-      const authData = await authResponse.json();
-      const userId = authData.id;
+      const userId = authData.user.id;
 
       // Create record in users table
-      const dbResponse = await fetch(`${supabaseUrl}/rest/v1/users`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${serviceRoleKey}`,
-          'apikey': serviceRoleKey,
-          'Content-Type': 'application/json',
-          'Prefer': 'return=representation'
-        },
-        body: JSON.stringify({
+      const { data: newUser, error: dbError } = await supabaseAdmin
+        .from('users')
+        .insert({
           id: userId,
           email: userData.email,
           name: userData.name,
@@ -206,19 +179,13 @@ Deno.serve(async (req: Request) => {
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
         })
-      });
+        .select()
+        .single();
 
-      if (!dbResponse.ok) {
+      if (dbError) {
         // If database insert fails, delete the auth user
-        await fetch(`${supabaseUrl}/auth/v1/admin/users/${userId}`, {
-          method: 'DELETE',
-          headers: {
-            'Authorization': `Bearer ${serviceRoleKey}`,
-            'apikey': serviceRoleKey
-          }
-        });
+        await supabaseAdmin.auth.admin.deleteUser(userId);
 
-        const dbError = await dbResponse.json();
         console.error('Error creating user in database:', dbError);
         return new Response(
           JSON.stringify({ 
@@ -232,13 +199,12 @@ Deno.serve(async (req: Request) => {
         );
       }
 
-      const newUser = await dbResponse.json();
       console.log('✅ User created successfully:', userId);
 
       return new Response(
         JSON.stringify({
           success: true,
-          user: Array.isArray(newUser) ? newUser[0] : newUser,
+          user: newUser,
           message: 'Usuario creado exitosamente'
         }),
         { 
@@ -280,20 +246,11 @@ Deno.serve(async (req: Request) => {
 
       // Update email if changed
       if (userData.email) {
-        const authResponse = await fetch(`${supabaseUrl}/auth/v1/admin/users/${userId}`, {
-          method: 'PUT',
-          headers: {
-            'Authorization': `Bearer ${serviceRoleKey}`,
-            'apikey': serviceRoleKey,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            email: userData.email
-          })
+        const { error: authError } = await supabaseAdmin.auth.admin.updateUserById(userId, {
+          email: userData.email
         });
 
-        if (!authResponse.ok) {
-          const authError = await authResponse.json();
+        if (authError) {
           console.error('Error updating user email:', authError);
           return new Response(
             JSON.stringify({ 
@@ -312,20 +269,11 @@ Deno.serve(async (req: Request) => {
 
       // Update password if provided
       if (userData.password) {
-        const passwordResponse = await fetch(`${supabaseUrl}/auth/v1/admin/users/${userId}`, {
-          method: 'PUT',
-          headers: {
-            'Authorization': `Bearer ${serviceRoleKey}`,
-            'apikey': serviceRoleKey,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            password: userData.password
-          })
+        const { error: passwordError } = await supabaseAdmin.auth.admin.updateUserById(userId, {
+          password: userData.password
         });
 
-        if (!passwordResponse.ok) {
-          const passwordError = await passwordResponse.json();
+        if (passwordError) {
           console.error('Error updating user password:', passwordError);
           return new Response(
             JSON.stringify({ 
@@ -341,19 +289,14 @@ Deno.serve(async (req: Request) => {
       }
 
       // Update in users table
-      const dbResponse = await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${userId}`, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${serviceRoleKey}`,
-          'apikey': serviceRoleKey,
-          'Content-Type': 'application/json',
-          'Prefer': 'return=representation'
-        },
-        body: JSON.stringify(updateData)
-      });
+      const { data: updatedUser, error: dbError } = await supabaseAdmin
+        .from('users')
+        .update(updateData)
+        .eq('id', userId)
+        .select()
+        .single();
 
-      if (!dbResponse.ok) {
-        const dbError = await dbResponse.json();
+      if (dbError) {
         console.error('Error updating user in database:', dbError);
         return new Response(
           JSON.stringify({ 
@@ -367,13 +310,12 @@ Deno.serve(async (req: Request) => {
         );
       }
 
-      const updatedUser = await dbResponse.json();
       console.log('✅ User updated successfully:', userId);
 
       return new Response(
         JSON.stringify({
           success: true,
-          user: Array.isArray(updatedUser) ? updatedUser[0] : updatedUser,
+          user: updatedUser,
           message: 'Usuario actualizado exitosamente'
         }),
         { 
@@ -403,16 +345,9 @@ Deno.serve(async (req: Request) => {
       console.log('🔄 Deleting user:', userId);
 
       // Delete from Auth (this will cascade to users table)
-      const authResponse = await fetch(`${supabaseUrl}/auth/v1/admin/users/${userId}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${serviceRoleKey}`,
-          'apikey': serviceRoleKey
-        }
-      });
+      const { error: authError } = await supabaseAdmin.auth.admin.deleteUser(userId);
 
-      if (!authResponse.ok) {
-        const authError = await authResponse.json();
+      if (authError) {
         console.error('Error deleting user from Auth:', authError);
         return new Response(
           JSON.stringify({ 

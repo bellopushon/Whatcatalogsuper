@@ -1,3 +1,5 @@
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.3'
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -36,13 +38,33 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    if (action === 'login') {
-      // Crear cliente de Supabase con service role para bypass RLS
-      const supabaseAdmin = createClient(
-        Deno.env.get('SUPABASE_URL') ?? '',
-        Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-      );
+    // Get environment variables
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
 
+    if (!supabaseUrl || !serviceRoleKey) {
+      console.error('Missing environment variables');
+      return new Response(
+        JSON.stringify({ 
+          error: 'Configuración del servidor incompleta',
+          code: 'MISSING_ENV_VARS'
+        }),
+        { 
+          status: 500, 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        }
+      );
+    }
+
+    // Create Supabase admin client
+    const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false
+      }
+    });
+
+    if (action === 'login') {
       // Intentar autenticación
       const { data: authData, error: authError } = await supabaseAdmin.auth.signInWithPassword({
         email,
@@ -171,11 +193,6 @@ Deno.serve(async (req: Request) => {
         );
       }
 
-      const supabaseAdmin = createClient(
-        Deno.env.get('SUPABASE_URL') ?? '',
-        Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-      );
-
       const { data: { user }, error } = await supabaseAdmin.auth.getUser(
         authHeader.replace('Bearer ', '')
       );
@@ -234,106 +251,3 @@ Deno.serve(async (req: Request) => {
     );
   }
 });
-
-// Helper function to create Supabase client
-function createClient(supabaseUrl: string, supabaseKey: string) {
-  return {
-    auth: {
-      signInWithPassword: async ({ email, password }: { email: string; password: string }) => {
-        const response = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=password`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'apikey': supabaseKey,
-            'Authorization': `Bearer ${supabaseKey}`
-          },
-          body: JSON.stringify({ email, password })
-        });
-
-        const data = await response.json();
-        
-        if (!response.ok) {
-          return { data: { user: null, session: null }, error: data };
-        }
-
-        return { 
-          data: { 
-            user: data.user, 
-            session: data 
-          }, 
-          error: null 
-        };
-      },
-      getUser: async (token: string) => {
-        const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'apikey': supabaseKey
-          }
-        });
-
-        const data = await response.json();
-        
-        if (!response.ok) {
-          return { data: { user: null }, error: data };
-        }
-
-        return { data: { user: data }, error: null };
-      }
-    },
-    from: (table: string) => ({
-      select: (columns = '*') => ({
-        eq: (column: string, value: any) => ({
-          single: async () => {
-            const response = await fetch(
-              `${supabaseUrl}/rest/v1/${table}?select=${columns}&${column}=eq.${value}`,
-              {
-                headers: {
-                  'apikey': supabaseKey,
-                  'Authorization': `Bearer ${supabaseKey}`,
-                  'Content-Type': 'application/json'
-                }
-              }
-            );
-
-            const data = await response.json();
-            
-            if (!response.ok) {
-              return { data: null, error: data };
-            }
-
-            if (data.length === 0) {
-              return { data: null, error: { code: 'PGRST116', message: 'No rows found' } };
-            }
-
-            return { data: data[0], error: null };
-          }
-        })
-      }),
-      insert: (values: any) => ({
-        select: (columns = '*') => ({
-          single: async () => {
-            const response = await fetch(`${supabaseUrl}/rest/v1/${table}`, {
-              method: 'POST',
-              headers: {
-                'apikey': supabaseKey,
-                'Authorization': `Bearer ${supabaseKey}`,
-                'Content-Type': 'application/json',
-                'Prefer': 'return=representation'
-              },
-              body: JSON.stringify(values)
-            });
-
-            const data = await response.json();
-            
-            if (!response.ok) {
-              return { data: null, error: data };
-            }
-
-            return { data: data[0], error: null };
-          }
-        })
-      })
-    })
-  };
-}

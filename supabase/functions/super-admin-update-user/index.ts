@@ -1,3 +1,5 @@
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.3'
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -47,6 +49,14 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    // Create Supabase admin client
+    const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false
+      }
+    });
+
     // Verify super admin authentication
     const authHeader = req.headers.get('Authorization');
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -65,14 +75,9 @@ Deno.serve(async (req: Request) => {
     const token = authHeader.replace('Bearer ', '');
     
     // Verify the JWT token
-    const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'apikey': serviceRoleKey,
-      }
-    });
+    const { data: { user }, error: authError } = await supabaseAdmin.auth.getUser(token);
 
-    if (!userResponse.ok) {
+    if (authError || !user) {
       return new Response(
         JSON.stringify({ 
           error: 'Token de autenticación inválido',
@@ -84,8 +89,6 @@ Deno.serve(async (req: Request) => {
         }
       );
     }
-
-    const user = await userResponse.json();
     
     if (user.email !== SUPER_ADMIN_EMAIL) {
       return new Response(
@@ -120,32 +123,13 @@ Deno.serve(async (req: Request) => {
     console.log(`🔄 Updating user: ${userData.userId}`);
 
     // Step 1: Get current user data
-    const currentUserResponse = await fetch(
-      `${supabaseUrl}/rest/v1/users?select=*&id=eq.${userData.userId}`,
-      {
-        headers: {
-          'apikey': serviceRoleKey,
-          'Authorization': `Bearer ${serviceRoleKey}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
+    const { data: currentUser, error: userError } = await supabaseAdmin
+      .from('users')
+      .select('*')
+      .eq('id', userData.userId)
+      .single();
 
-    if (!currentUserResponse.ok) {
-      return new Response(
-        JSON.stringify({ 
-          error: 'Error al obtener datos del usuario',
-          code: 'USER_FETCH_FAILED'
-        }),
-        { 
-          status: 500, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-        }
-      );
-    }
-
-    const users = await currentUserResponse.json();
-    if (!users || users.length === 0) {
+    if (userError || !currentUser) {
       return new Response(
         JSON.stringify({ 
           error: `Usuario con ID ${userData.userId} no encontrado`,
@@ -157,8 +141,6 @@ Deno.serve(async (req: Request) => {
         }
       );
     }
-
-    const currentUser = users[0];
 
     // Step 2: Validate email if being updated
     if (userData.email && userData.email !== currentUser.email) {
@@ -177,31 +159,23 @@ Deno.serve(async (req: Request) => {
       }
 
       // Check if new email already exists
-      const existingUserResponse = await fetch(
-        `${supabaseUrl}/rest/v1/users?select=id&email=eq.${userData.email}&id=neq.${userData.userId}`,
-        {
-          headers: {
-            'apikey': serviceRoleKey,
-            'Authorization': `Bearer ${serviceRoleKey}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
+      const { data: existingUsers, error: existingError } = await supabaseAdmin
+        .from('users')
+        .select('id')
+        .eq('email', userData.email)
+        .neq('id', userData.userId);
 
-      if (existingUserResponse.ok) {
-        const existingUsers = await existingUserResponse.json();
-        if (existingUsers && existingUsers.length > 0) {
-          return new Response(
-            JSON.stringify({ 
-              error: 'Este email ya está registrado',
-              code: 'EMAIL_ALREADY_EXISTS'
-            }),
-            { 
-              status: 400, 
-              headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-            }
-          );
-        }
+      if (!existingError && existingUsers && existingUsers.length > 0) {
+        return new Response(
+          JSON.stringify({ 
+            error: 'Este email ya está registrado',
+            code: 'EMAIL_ALREADY_EXISTS'
+          }),
+          { 
+            status: 400, 
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          }
+        );
       }
     }
 
@@ -221,32 +195,13 @@ Deno.serve(async (req: Request) => {
 
     // Step 4: Validate plan if being updated
     if (userData.plan && userData.plan !== currentUser.plan) {
-      const planResponse = await fetch(
-        `${supabaseUrl}/rest/v1/plans?select=*&id=eq.${userData.plan}`,
-        {
-          headers: {
-            'apikey': serviceRoleKey,
-            'Authorization': `Bearer ${serviceRoleKey}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
+      const { data: plans, error: planError } = await supabaseAdmin
+        .from('plans')
+        .select('*')
+        .eq('id', userData.plan)
+        .single();
 
-      if (!planResponse.ok) {
-        return new Response(
-          JSON.stringify({ 
-            error: 'Error al verificar el plan',
-            code: 'PLAN_VERIFICATION_FAILED'
-          }),
-          { 
-            status: 500, 
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-          }
-        );
-      }
-
-      const plans = await planResponse.json();
-      if (!plans || plans.length === 0) {
+      if (planError || !plans) {
         return new Response(
           JSON.stringify({ 
             error: `Plan con ID ${userData.plan} no encontrado`,
@@ -266,22 +221,13 @@ Deno.serve(async (req: Request) => {
       if (userData.email) authUpdateData.email = userData.email;
       if (userData.password) authUpdateData.password = userData.password;
 
-      const authUpdateResponse = await fetch(`${supabaseUrl}/auth/v1/admin/users/${userData.userId}`, {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${serviceRoleKey}`,
-          'apikey': serviceRoleKey,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(authUpdateData)
-      });
+      const { error: authUpdateError } = await supabaseAdmin.auth.admin.updateUserById(userData.userId, authUpdateData);
 
-      if (!authUpdateResponse.ok) {
-        const authError = await authUpdateResponse.json();
-        console.error('Error updating user in Auth:', authError);
+      if (authUpdateError) {
+        console.error('Error updating user in Auth:', authUpdateError);
         return new Response(
           JSON.stringify({ 
-            error: authError.message || 'Error al actualizar usuario en autenticación',
+            error: authUpdateError.message || 'Error al actualizar usuario en autenticación',
             code: 'AUTH_UPDATE_FAILED'
           }),
           { 
@@ -305,23 +251,18 @@ Deno.serve(async (req: Request) => {
     if (userData.plan !== undefined) dbUpdateData.plan = userData.plan;
     if (userData.isActive !== undefined) dbUpdateData.is_active = userData.isActive;
 
-    const dbUpdateResponse = await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${userData.userId}`, {
-      method: 'PATCH',
-      headers: {
-        'Authorization': `Bearer ${serviceRoleKey}`,
-        'apikey': serviceRoleKey,
-        'Content-Type': 'application/json',
-        'Prefer': 'return=representation'
-      },
-      body: JSON.stringify(dbUpdateData)
-    });
+    const { data: updatedUser, error: dbUpdateError } = await supabaseAdmin
+      .from('users')
+      .update(dbUpdateData)
+      .eq('id', userData.userId)
+      .select()
+      .single();
 
-    if (!dbUpdateResponse.ok) {
-      const dbError = await dbUpdateResponse.json();
-      console.error('Error updating user in database:', dbError);
+    if (dbUpdateError) {
+      console.error('Error updating user in database:', dbUpdateError);
       return new Response(
         JSON.stringify({ 
-          error: dbError.message || 'Error al actualizar usuario en base de datos',
+          error: dbUpdateError.message || 'Error al actualizar usuario en base de datos',
           code: 'DB_UPDATE_FAILED'
         }),
         { 
@@ -331,18 +272,10 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const updatedUser = await dbUpdateResponse.json();
-    const finalUser = Array.isArray(updatedUser) ? updatedUser[0] : updatedUser;
-
     // Step 7: Log the action in system_logs
-    const logResponse = await fetch(`${supabaseUrl}/rest/v1/system_logs`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${serviceRoleKey}`,
-        'apikey': serviceRoleKey,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
+    const { error: logError } = await supabaseAdmin
+      .from('system_logs')
+      .insert({
         admin_id: userData.adminId || user.id,
         action: 'update_user',
         object_type: 'user',
@@ -352,10 +285,9 @@ Deno.serve(async (req: Request) => {
           timestamp: new Date().toISOString()
         },
         ip_address: req.headers.get('x-forwarded-for') || 'unknown'
-      })
-    });
+      });
 
-    if (!logResponse.ok) {
+    if (logError) {
       console.warn('Failed to log action, but continuing...');
     }
 
@@ -365,17 +297,17 @@ Deno.serve(async (req: Request) => {
       JSON.stringify({
         success: true,
         user: {
-          id: finalUser.id,
-          email: finalUser.email,
-          name: finalUser.name,
-          phone: finalUser.phone,
-          company: finalUser.company,
-          location: finalUser.location,
-          plan: finalUser.plan,
-          isActive: finalUser.is_active,
-          isSuperAdmin: finalUser.email === SUPER_ADMIN_EMAIL,
-          createdAt: finalUser.created_at,
-          updatedAt: finalUser.updated_at
+          id: updatedUser.id,
+          email: updatedUser.email,
+          name: updatedUser.name,
+          phone: updatedUser.phone,
+          company: updatedUser.company,
+          location: updatedUser.location,
+          plan: updatedUser.plan,
+          isActive: updatedUser.is_active,
+          isSuperAdmin: updatedUser.email === SUPER_ADMIN_EMAIL,
+          createdAt: updatedUser.created_at,
+          updatedAt: updatedUser.updated_at
         },
         message: 'Usuario actualizado exitosamente'
       }),
