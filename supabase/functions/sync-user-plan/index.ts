@@ -118,7 +118,7 @@ Deno.serve(async (req: Request) => {
 
     console.log(`🔄 Updating user plan: ${userId} -> ${newPlanId}`);
 
-    // Step 1: Verify the plan exists - use RPC for UUID casting
+    // Step 1: Verify the plan exists
     const { data: plans, error: planError } = await supabaseAdmin
       .rpc('get_plan_by_id', { plan_id: newPlanId });
 
@@ -138,7 +138,7 @@ Deno.serve(async (req: Request) => {
 
     const planData = plans[0];
 
-    // Step 2: Get current user data - use RPC for UUID casting
+    // Step 2: Get current user data
     const { data: currentUser, error: userError } = await supabaseAdmin
       .rpc('get_user_by_id', { user_id: userId });
 
@@ -159,7 +159,7 @@ Deno.serve(async (req: Request) => {
     const userData = currentUser[0];
     const oldPlanId = userData.plan;
 
-    // Step 3: Update user plan using RPC for proper UUID handling
+    // Step 3: Update user plan
     const { data: updatedUser, error: updateError } = await supabaseAdmin
       .rpc('update_user_plan', { 
         user_id: userId, 
@@ -180,7 +180,7 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Step 4: Log the action in system_logs - use RPC for UUID handling
+    // Step 4: Log the action in system_logs
     const { error: logError } = await supabaseAdmin
       .rpc('insert_system_log', {
         admin_id: adminId || user.id,
@@ -190,7 +190,7 @@ Deno.serve(async (req: Request) => {
         details: {
           oldPlanId,
           newPlanId,
-          oldPlanName: 'Unknown',
+          oldPlanName: oldPlanId,
           newPlanName: planData.name,
           timestamp: new Date().toISOString()
         },
