@@ -304,7 +304,10 @@ export default function UserManagement() {
         setOpenDropdown(null);
         success('Portal abierto', 'Se ha abierto el portal de Stripe en una nueva pestaña');
       } else {
-        throw new Error(data.error || 'Error al crear sesión del portal');
+        // Extract specific error details from the response
+        const errorMessage = data.error || 'Error desconocido al crear sesión del portal';
+        const errorDetails = data.details ? ` - ${data.details}` : '';
+        throw new Error(`${errorMessage}${errorDetails}`);
       }
     } catch (err: any) {
       console.error('Error opening Stripe portal:', err);
