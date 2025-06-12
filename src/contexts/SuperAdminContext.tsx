@@ -31,6 +31,7 @@ export interface User {
   lastLoginAt?: string;
   isActive: boolean;
   isSuperAdmin: boolean;
+  stripeCustomerId?: string;
 }
 
 // Tipos para planes
@@ -259,6 +260,7 @@ const SuperAdminContext = createContext<{
   syncStripeProducts: () => Promise<void>;
   syncPlanWithStripe: (planId: string) => Promise<void>;
   validateStripeIntegration: (planId: string) => Promise<boolean>;
+  fixUserStripeCustomer: (userId: string) => Promise<void>;
   // Helper functions for plan logic
   getFreePlan: () => Plan | null;
   getPlanByLevel: (level: number) => Plan | null;
@@ -290,6 +292,7 @@ const SuperAdminContext = createContext<{
   syncStripeProducts: async () => {},
   syncPlanWithStripe: async () => {},
   validateStripeIntegration: async () => false,
+  fixUserStripeCustomer: async () => {},
   getFreePlan: () => null,
   getPlanByLevel: () => null,
   getUserPlan: () => null,
@@ -346,6 +349,7 @@ function transformSupabaseUserToAppUser(userData: any): User {
     lastLoginAt: userData.last_login_at || undefined,
     isActive: userData.is_active ?? true,
     isSuperAdmin: userData.email === SUPER_ADMIN_EMAIL,
+    stripeCustomerId: userData.stripe_customer_id || undefined,
   };
 }
 
@@ -983,7 +987,7 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // 🚀 NUEVA FUNCIÓN: Sincronizar plan específico con Stripe
+  // 🚀 NUEVA FUNCIÓN: Sincronizar plan con Stripe
   const syncPlanWithStripe = async (planId: string) => {
     try {
       console.log(`🔄 Syncing plan with Stripe: ${planId}`);
@@ -1023,7 +1027,7 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // 🚀 NUEVA FUNCIÓN: Validar integración de Stripe para un plan
+  // 🚀 NUEVA FUNCIÓN: Validar integración de Stripe
   const validateStripeIntegration = async (planId: string): Promise<boolean> => {
     try {
       console.log(`🔄 Validating Stripe integration for plan: ${planId}`);
@@ -1059,7 +1063,56 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
       return result.valid;
     } catch (error: any) {
       console.error('❌ Error validating Stripe integration:', error);
-      return false;
+      throw error;
+    }
+  };
+
+  // 🚀 NUEVA FUNCIÓN: Corregir usuario sin Stripe Customer ID
+  const fixUserStripeCustomer = async (userId: string) => {
+    try {
+      console.log(`🔄 Fixing Stripe customer for user: ${userId}`);
+      
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        throw new Error('No authentication session found');
+      }
+
+      const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/fix-user-stripe-customer`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          userId,
+          adminId: state.user?.id
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const result = await response.json();
+      
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to fix user Stripe customer');
+      }
+
+      // Update local state with the updated user
+      if (result.user) {
+        const updatedUser = transformSupabaseUserToAppUser(result.user);
+        dispatch({ type: 'UPDATE_USER', payload: updatedUser });
+      }
+
+      // Reload system logs to show the new action
+      await loadSystemLogs();
+
+      console.log(`✅ User Stripe customer fixed successfully: ${userId}`);
+    } catch (error: any) {
+      console.error('❌ Error fixing user Stripe customer:', error);
+      throw error;
     }
   };
 
@@ -1275,14 +1328,15 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
       const newPlan = transformSupabasePlanToAppPlan(data);
       dispatch({ type: 'ADD_PLAN', payload: newPlan });
 
-      // Auto-sync with Stripe if not free and Stripe is configured
+      // Auto-sync with Stripe if it's a paid plan and Stripe is configured
       if (!newPlan.isFree && state.stripeConfig) {
         try {
           await syncPlanWithStripe(newPlan.id);
           // Reload plans to get updated Stripe IDs
           await loadPlans();
-        } catch (stripeError) {
-          console.warn('Plan created but Stripe sync failed:', stripeError);
+        } catch (syncError) {
+          console.warn('Plan created but Stripe sync failed:', syncError);
+          // Don't throw error, plan was created successfully
         }
       }
 
@@ -1327,14 +1381,15 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
       const updatedPlan = transformSupabasePlanToAppPlan(data);
       dispatch({ type: 'UPDATE_PLAN', payload: updatedPlan });
 
-      // Auto-sync with Stripe if not free and Stripe is configured
+      // Auto-sync with Stripe if it's a paid plan and Stripe is configured
       if (!updatedPlan.isFree && state.stripeConfig) {
         try {
           await syncPlanWithStripe(updatedPlan.id);
           // Reload plans to get updated Stripe IDs
           await loadPlans();
-        } catch (stripeError) {
-          console.warn('Plan updated but Stripe sync failed:', stripeError);
+        } catch (syncError) {
+          console.warn('Plan updated but Stripe sync failed:', syncError);
+          // Don't throw error, plan was updated successfully
         }
       }
 
@@ -1600,6 +1655,7 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
       syncStripeProducts,
       syncPlanWithStripe,
       validateStripeIntegration,
+      fixUserStripeCustomer,
       getFreePlan,
       getPlanByLevel,
       getUserPlan,

@@ -24,7 +24,8 @@ import {
   Save,
   X,
   Edit,
-  AlertTriangle
+  AlertTriangle,
+  Wrench
 } from 'lucide-react';
 import { useSuperAdmin } from '../../contexts/SuperAdminContext';
 import { useToast } from '../../contexts/ToastContext';
@@ -52,7 +53,7 @@ interface EditUserForm {
 }
 
 export default function UserManagement() {
-  const { state, updateUserPlan, toggleUserStatus, loadUsers, createUser, updateUser } = useSuperAdmin();
+  const { state, updateUserPlan, toggleUserStatus, loadUsers, createUser, updateUser, fixUserStripeCustomer } = useSuperAdmin();
   const { success, error } = useToast();
   const [searchTerm, setSearchTerm] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -64,6 +65,7 @@ export default function UserManagement() {
   const [showFilters, setShowFilters] = useState(false);
   const [selectedPlanFilter, setSelectedPlanFilter] = useState('all');
   const [selectedStatusFilter, setSelectedStatusFilter] = useState('all');
+  const [fixingUser, setFixingUser] = useState<string | null>(null);
   
   // Pagination
   const [currentPage, setCurrentPage] = useState(1);
@@ -137,7 +139,7 @@ export default function UserManagement() {
     const rect = buttonElement.getBoundingClientRect();
     const viewportHeight = window.innerHeight;
     const viewportWidth = window.innerWidth;
-    const dropdownHeight = 200;
+    const dropdownHeight = 250; // Increased for new fix option
     const dropdownWidth = 200;
     
     let position: { top?: number; bottom?: number; left?: number; right?: number } = {};
@@ -246,6 +248,20 @@ export default function UserManagement() {
     } catch (err: any) {
       console.error('Error toggling status:', err);
       error('Error al cambiar estado', err.message || 'No se pudo cambiar el estado del usuario');
+    }
+  };
+
+  const handleFixUserStripe = async (userId: string) => {
+    setFixingUser(userId);
+    try {
+      await fixUserStripeCustomer(userId);
+      setOpenDropdown(null);
+      success('Usuario corregido', 'Se ha corregido la información de Stripe del usuario');
+    } catch (err: any) {
+      console.error('Error fixing user Stripe:', err);
+      error('Error al corregir usuario', err.message || 'No se pudo corregir la información de Stripe');
+    } finally {
+      setFixingUser(null);
     }
   };
 
@@ -550,6 +566,11 @@ export default function UserManagement() {
   const currentForm = editingUser ? editForm : createForm;
   const setCurrentForm = editingUser ? setEditForm : setCreateForm;
 
+  const needsStripeCustomerFix = (user: any) => {
+    const userPlan = state.plans.find(p => p.id === user.plan);
+    return userPlan && !userPlan.isFree && !user.stripeCustomerId;
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Compact Mobile Header */}
@@ -669,6 +690,9 @@ export default function UserManagement() {
                         {user.isSuperAdmin && (
                           <Crown className="w-4 h-4 text-yellow-500 flex-shrink-0" />
                         )}
+                        {needsStripeCustomerFix(user) && (
+                          <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0" title="Necesita corrección de Stripe" />
+                        )}
                       </div>
                       
                       <div className="flex items-center gap-2 mb-2">
@@ -737,6 +761,9 @@ export default function UserManagement() {
                           <h3 className="font-medium text-gray-900 truncate">{user.name}</h3>
                           {user.isSuperAdmin && (
                             <Crown className="w-4 h-4 text-yellow-500" />
+                          )}
+                          {needsStripeCustomerFix(user) && (
+                            <AlertTriangle className="w-4 h-4 text-amber-500" title="Necesita corrección de Stripe" />
                           )}
                         </div>
                         <p className="text-sm text-gray-500 truncate">{user.email}</p>
@@ -847,6 +874,21 @@ export default function UserManagement() {
             <Edit className="w-4 h-4" />
             Editar Usuario
           </button>
+
+          {/* Fix Stripe Customer option */}
+          {(() => {
+            const user = state.users.find(u => u.id === openDropdown);
+            return user && needsStripeCustomerFix(user) && (
+              <button
+                onClick={() => handleFixUserStripe(openDropdown)}
+                disabled={fixingUser === openDropdown}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-amber-700 hover:bg-amber-50 transition-colors disabled:opacity-50"
+              >
+                <Wrench className={`w-4 h-4 ${fixingUser === openDropdown ? 'animate-pulse' : ''}`} />
+                Corregir Stripe
+              </button>
+            );
+          })()}
           
           <button
             onClick={() => handleToggleStatus(openDropdown)}
