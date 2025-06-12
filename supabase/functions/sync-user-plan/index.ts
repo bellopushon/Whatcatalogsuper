@@ -118,14 +118,11 @@ Deno.serve(async (req: Request) => {
 
     console.log(`🔄 Updating user plan: ${userId} -> ${newPlanId}`);
 
-    // Step 1: Verify the plan exists
+    // Step 1: Verify the plan exists - use RPC for UUID casting
     const { data: plans, error: planError } = await supabaseAdmin
-      .from('plans')
-      .select('*')
-      .eq('id', newPlanId)
-      .single();
+      .rpc('get_plan_by_id', { plan_id: newPlanId });
 
-    if (planError || !plans) {
+    if (planError || !plans || plans.length === 0) {
       console.error('Plan verification failed:', planError);
       return new Response(
         JSON.stringify({ 
@@ -139,14 +136,13 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Step 2: Get current user data
-    const { data: currentUser, error: userError } = await supabaseAdmin
-      .from('users')
-      .select('*')
-      .eq('id', userId)
-      .single();
+    const planData = plans[0];
 
-    if (userError || !currentUser) {
+    // Step 2: Get current user data - use RPC for UUID casting
+    const { data: currentUser, error: userError } = await supabaseAdmin
+      .rpc('get_user_by_id', { user_id: userId });
+
+    if (userError || !currentUser || currentUser.length === 0) {
       console.error('User fetch failed:', userError);
       return new Response(
         JSON.stringify({ 
@@ -160,18 +156,15 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const oldPlanId = currentUser.plan;
+    const userData = currentUser[0];
+    const oldPlanId = userData.plan;
 
-    // Step 3: Update user plan in database
+    // Step 3: Update user plan using RPC for proper UUID handling
     const { data: updatedUser, error: updateError } = await supabaseAdmin
-      .from('users')
-      .update({
-        plan: newPlanId,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', userId)
-      .select()
-      .single();
+      .rpc('update_user_plan', { 
+        user_id: userId, 
+        new_plan_id: newPlanId 
+      });
 
     if (updateError) {
       console.error('Error updating user plan:', updateError);
@@ -187,10 +180,9 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Step 4: Log the action in system_logs
+    // Step 4: Log the action in system_logs - use RPC for UUID handling
     const { error: logError } = await supabaseAdmin
-      .from('system_logs')
-      .insert({
+      .rpc('insert_system_log', {
         admin_id: adminId || user.id,
         action: 'update_user_plan',
         object_type: 'user',
@@ -199,7 +191,7 @@ Deno.serve(async (req: Request) => {
           oldPlanId,
           newPlanId,
           oldPlanName: 'Unknown',
-          newPlanName: plans.name,
+          newPlanName: planData.name,
           timestamp: new Date().toISOString()
         },
         ip_address: req.headers.get('x-forwarded-for') || 'unknown'
@@ -214,13 +206,13 @@ Deno.serve(async (req: Request) => {
     return new Response(
       JSON.stringify({
         success: true,
-        user: updatedUser,
-        plan: plans,
-        message: `Plan actualizado a ${plans.name}`,
+        user: updatedUser[0],
+        plan: planData,
+        message: `Plan actualizado a ${planData.name}`,
         changes: {
           oldPlanId,
           newPlanId,
-          planName: plans.name
+          planName: planData.name
         }
       }),
       { 
