@@ -1027,7 +1027,7 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // 🚀 NUEVA FUNCIÓN: Validar integración de Stripe
+  // 🚀 NUEVA FUNCIÓN: Validar integración con Stripe
   const validateStripeIntegration = async (planId: string): Promise<boolean> => {
     try {
       console.log(`🔄 Validating Stripe integration for plan: ${planId}`);
@@ -1059,7 +1059,7 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
         throw new Error(result.error || 'Failed to validate Stripe integration');
       }
 
-      console.log(`✅ Stripe integration validation result: ${result.valid}`);
+      console.log(`✅ Stripe integration validated for plan: ${planId} - Valid: ${result.valid}`);
       return result.valid;
     } catch (error: any) {
       console.error('❌ Error validating Stripe integration:', error);
@@ -1067,7 +1067,7 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // 🚀 NUEVA FUNCIÓN: Corregir usuario sin Stripe Customer ID
+  // 🚀 NUEVA FUNCIÓN: Corregir usuario sin Stripe Customer
   const fixUserStripeCustomer = async (userId: string) => {
     try {
       console.log(`🔄 Fixing Stripe customer for user: ${userId}`);
@@ -1332,11 +1332,8 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
       if (!newPlan.isFree && state.stripeConfig) {
         try {
           await syncPlanWithStripe(newPlan.id);
-          // Reload plans to get updated Stripe IDs
-          await loadPlans();
         } catch (syncError) {
           console.warn('Plan created but Stripe sync failed:', syncError);
-          // Don't throw error, plan was created successfully
         }
       }
 
@@ -1385,11 +1382,8 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
       if (!updatedPlan.isFree && state.stripeConfig) {
         try {
           await syncPlanWithStripe(updatedPlan.id);
-          // Reload plans to get updated Stripe IDs
-          await loadPlans();
         } catch (syncError) {
           console.warn('Plan updated but Stripe sync failed:', syncError);
-          // Don't throw error, plan was updated successfully
         }
       }
 
