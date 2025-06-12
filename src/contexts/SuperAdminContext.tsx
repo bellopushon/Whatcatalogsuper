@@ -33,7 +33,7 @@ export interface User {
   isSuperAdmin: boolean;
 }
 
-// Tipos para planes
+// Tipos para planes - ACTUALIZADO CON STRIPE
 export interface Plan {
   id: string;
   name: string;
@@ -46,6 +46,11 @@ export interface Plan {
   isActive: boolean;
   isFree: boolean; // Indicates if this is the free plan
   level: number; // Plan level for comparison (1 = free, 2 = basic, 3 = premium, etc.)
+  // NUEVOS CAMPOS STRIPE
+  stripeProductId?: string;
+  stripePriceId?: string;
+  currency: string;
+  interval: 'month' | 'year';
   createdAt: string;
   updatedAt?: string;
 }
@@ -253,6 +258,11 @@ const SuperAdminContext = createContext<{
   loadStripeTransactions: () => Promise<void>;
   testStripeConnection: () => Promise<boolean>;
   syncStripeProducts: () => Promise<void>;
+  // NUEVAS FUNCIONES STRIPE PARA PLANES
+  createStripeProduct: (planData: Plan) => Promise<string>;
+  createStripePrice: (productId: string, planData: Plan) => Promise<string>;
+  syncPlanWithStripe: (planId: string) => Promise<void>;
+  validateStripeIntegration: (planId: string) => Promise<boolean>;
   // Helper functions for plan logic
   getFreePlan: () => Plan | null;
   getPlanByLevel: (level: number) => Plan | null;
@@ -282,6 +292,10 @@ const SuperAdminContext = createContext<{
   loadStripeTransactions: async () => {},
   testStripeConnection: async () => false,
   syncStripeProducts: async () => {},
+  createStripeProduct: async () => '',
+  createStripePrice: async () => '',
+  syncPlanWithStripe: async () => {},
+  validateStripeIntegration: async () => false,
   getFreePlan: () => null,
   getPlanByLevel: () => null,
   getUserPlan: () => null,
@@ -315,7 +329,7 @@ export interface UpdateUserData {
   isActive?: boolean;
 }
 
-// Funciones de transformación
+// Funciones de transformación - ACTUALIZADAS CON STRIPE
 function transformSupabaseUserToAppUser(userData: any): User {
   return {
     id: userData.id,
@@ -367,6 +381,11 @@ function transformSupabasePlanToAppPlan(planData: any): Plan {
     isActive: planData.is_active ?? true,
     isFree: planData.is_free ?? false,
     level: planData.level || 1,
+    // NUEVOS CAMPOS STRIPE
+    stripeProductId: planData.stripe_product_id || undefined,
+    stripePriceId: planData.stripe_price_id || undefined,
+    currency: planData.currency || 'usd',
+    interval: planData.interval || 'month',
     createdAt: planData.created_at,
     updatedAt: planData.updated_at || undefined,
   };
@@ -481,6 +500,201 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
         return userPlan.maxCategories;
       default:
         return 0;
+    }
+  };
+
+  // NUEVAS FUNCIONES STRIPE PARA PLANES
+  const createStripeProduct = async (planData: Plan): Promise<string> => {
+    try {
+      if (!state.stripeConfig) {
+        throw new Error('Stripe no está configurado');
+      }
+
+      console.log('🔄 Creating Stripe product for plan:', planData.name);
+
+      const response = await fetch('https://api.stripe.com/v1/products', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${state.stripeConfig.secretKey}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: new URLSearchParams({
+          name: planData.name,
+          description: planData.description,
+          'metadata[plan_id]': planData.id,
+          'metadata[plan_level]': planData.level.toString(),
+          'metadata[max_stores]': planData.maxStores.toString(),
+          'metadata[max_products]': planData.maxProducts.toString(),
+          'metadata[max_categories]': planData.maxCategories.toString()
+        })
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`Error creating Stripe product: ${error}`);
+      }
+
+      const product = await response.json();
+
+      // Store in database
+      await supabase
+        .from('stripe_products')
+        .upsert({
+          id: product.id,
+          name: product.name,
+          description: product.description,
+          is_active: product.active,
+          metadata: product.metadata
+        });
+
+      console.log('✅ Stripe product created:', product.id);
+      return product.id;
+    } catch (error) {
+      console.error('❌ Error creating Stripe product:', error);
+      throw error;
+    }
+  };
+
+  const createStripePrice = async (productId: string, planData: Plan): Promise<string> => {
+    try {
+      if (!state.stripeConfig) {
+        throw new Error('Stripe no está configurado');
+      }
+
+      console.log('🔄 Creating Stripe price for product:', productId);
+
+      const response = await fetch('https://api.stripe.com/v1/prices', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${state.stripeConfig.secretKey}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: new URLSearchParams({
+          product: productId,
+          unit_amount: Math.round(planData.price * 100).toString(),
+          currency: planData.currency,
+          'recurring[interval]': planData.interval,
+          'metadata[plan_id]': planData.id
+        })
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`Error creating Stripe price: ${error}`);
+      }
+
+      const price = await response.json();
+
+      // Store in database
+      await supabase
+        .from('stripe_prices')
+        .upsert({
+          id: price.id,
+          product_id: price.product,
+          amount: price.unit_amount,
+          currency: price.currency,
+          interval: price.recurring?.interval,
+          interval_count: price.recurring?.interval_count || 1,
+          is_active: price.active,
+          metadata: price.metadata
+        });
+
+      console.log('✅ Stripe price created:', price.id);
+      return price.id;
+    } catch (error) {
+      console.error('❌ Error creating Stripe price:', error);
+      throw error;
+    }
+  };
+
+  const syncPlanWithStripe = async (planId: string): Promise<void> => {
+    try {
+      const plan = state.plans.find(p => p.id === planId);
+      if (!plan) {
+        throw new Error('Plan no encontrado');
+      }
+
+      if (plan.isFree) {
+        console.log('ℹ️ Skipping Stripe sync for free plan');
+        return;
+      }
+
+      let productId = plan.stripeProductId;
+      let priceId = plan.stripePriceId;
+
+      // Create product if doesn't exist
+      if (!productId) {
+        productId = await createStripeProduct(plan);
+      }
+
+      // Create price if doesn't exist
+      if (!priceId) {
+        priceId = await createStripePrice(productId, plan);
+      }
+
+      // Update plan with Stripe IDs
+      await supabase
+        .from('plans')
+        .update({
+          stripe_product_id: productId,
+          stripe_price_id: priceId,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', planId);
+
+      // Update local state
+      const updatedPlan = { ...plan, stripeProductId: productId, stripePriceId: priceId };
+      dispatch({ type: 'UPDATE_PLAN', payload: updatedPlan });
+
+      console.log('✅ Plan synced with Stripe:', planId);
+    } catch (error) {
+      console.error('❌ Error syncing plan with Stripe:', error);
+      throw error;
+    }
+  };
+
+  const validateStripeIntegration = async (planId: string): Promise<boolean> => {
+    try {
+      const plan = state.plans.find(p => p.id === planId);
+      if (!plan) return false;
+
+      if (plan.isFree) return true; // Free plans don't need Stripe
+
+      if (!plan.stripeProductId || !plan.stripePriceId) return false;
+
+      if (!state.stripeConfig) return false;
+
+      // Verify product exists in Stripe
+      const productResponse = await fetch(`https://api.stripe.com/v1/products/${plan.stripeProductId}`, {
+        headers: {
+          'Authorization': `Bearer ${state.stripeConfig.secretKey}`
+        }
+      });
+
+      if (!productResponse.ok) return false;
+
+      // Verify price exists in Stripe
+      const priceResponse = await fetch(`https://api.stripe.com/v1/prices/${plan.stripePriceId}`, {
+        headers: {
+          'Authorization': `Bearer ${state.stripeConfig.secretKey}`
+        }
+      });
+
+      if (!priceResponse.ok) return false;
+
+      const price = await priceResponse.json();
+      
+      // Verify price matches
+      const expectedAmount = Math.round(plan.price * 100);
+      if (price.unit_amount !== expectedAmount) {
+        console.warn(`Price mismatch for plan ${planId}: expected ${expectedAmount}, got ${price.unit_amount}`);
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      console.error('❌ Error validating Stripe integration:', error);
+      return false;
     }
   };
 
@@ -619,7 +833,7 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Función para cargar planes desde la base de datos
+  // Función para cargar planes desde la base de datos - ACTUALIZADA
   const loadPlans = async () => {
     try {
       console.log('🔄 Loading plans from database...');
@@ -650,6 +864,8 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
             isActive: true,
             isFree: true,
             level: 1,
+            currency: 'usd',
+            interval: 'month',
             createdAt: new Date().toISOString(),
           },
           {
@@ -664,6 +880,8 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
             isActive: true,
             isFree: false,
             level: 2,
+            currency: 'usd',
+            interval: 'month',
             createdAt: new Date().toISOString(),
           },
           {
@@ -678,6 +896,8 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
             isActive: true,
             isFree: false,
             level: 3,
+            currency: 'usd',
+            interval: 'month',
             createdAt: new Date().toISOString(),
           },
         ];
@@ -1148,7 +1368,7 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Función para crear plan
+  // Función para crear plan - ACTUALIZADA CON STRIPE
   const createPlan = async (planData: Omit<Plan, 'id' | 'createdAt'>) => {
     try {
       console.log('🔄 Creating plan:', planData.name);
@@ -1166,6 +1386,8 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
           is_active: planData.isActive,
           is_free: planData.isFree,
           level: planData.level,
+          currency: planData.currency,
+          interval: planData.interval,
         })
         .select()
         .single();
@@ -1174,6 +1396,15 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
 
       const newPlan = transformSupabasePlanToAppPlan(data);
       dispatch({ type: 'ADD_PLAN', payload: newPlan });
+
+      // Sync with Stripe if not free plan
+      if (!newPlan.isFree && state.stripeConfig) {
+        try {
+          await syncPlanWithStripe(newPlan.id);
+        } catch (stripeError) {
+          console.warn('Plan created but Stripe sync failed:', stripeError);
+        }
+      }
 
       // Log de la acción
       await logAction('create_plan', 'plan', newPlan.id, planData);
@@ -1185,7 +1416,7 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Función para actualizar plan
+  // Función para actualizar plan - ACTUALIZADA CON STRIPE
   const updatePlan = async (planData: Plan) => {
     try {
       console.log('🔄 Updating plan:', planData.id);
@@ -1203,6 +1434,10 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
           is_active: planData.isActive,
           is_free: planData.isFree,
           level: planData.level,
+          currency: planData.currency,
+          interval: planData.interval,
+          stripe_product_id: planData.stripeProductId,
+          stripe_price_id: planData.stripePriceId,
           updated_at: new Date().toISOString(),
         })
         .eq('id', planData.id)
@@ -1213,6 +1448,15 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
 
       const updatedPlan = transformSupabasePlanToAppPlan(data);
       dispatch({ type: 'UPDATE_PLAN', payload: updatedPlan });
+
+      // Sync with Stripe if not free plan and config exists
+      if (!updatedPlan.isFree && state.stripeConfig) {
+        try {
+          await syncPlanWithStripe(updatedPlan.id);
+        } catch (stripeError) {
+          console.warn('Plan updated but Stripe sync failed:', stripeError);
+        }
+      }
 
       // Log de la acción
       await logAction('update_plan', 'plan', planData.id, planData);
@@ -1474,6 +1718,10 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
       loadStripeTransactions,
       testStripeConnection,
       syncStripeProducts,
+      createStripeProduct,
+      createStripePrice,
+      syncPlanWithStripe,
+      validateStripeIntegration,
       getFreePlan,
       getPlanByLevel,
       getUserPlan,
