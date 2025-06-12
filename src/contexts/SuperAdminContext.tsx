@@ -983,177 +983,82 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Nueva función: Sincronizar plan específico con Stripe
+  // 🚀 NUEVA FUNCIÓN: Sincronizar plan específico con Stripe
   const syncPlanWithStripe = async (planId: string) => {
     try {
-      if (!state.stripeConfig) {
-        throw new Error('Stripe no está configurado');
-      }
-
-      console.log(`🔄 Syncing plan ${planId} with Stripe...`);
-
-      const plan = state.plans.find(p => p.id === planId);
-      if (!plan) {
-        throw new Error('Plan no encontrado');
-      }
-
-      if (plan.isFree) {
-        throw new Error('Los planes gratuitos no requieren sincronización con Stripe');
-      }
-
-      // 1. Crear o actualizar producto en Stripe
-      let stripeProductId = plan.stripeProductId;
+      console.log(`🔄 Syncing plan with Stripe: ${planId}`);
       
-      if (!stripeProductId) {
-        // Crear nuevo producto
-        const productResponse = await fetch('https://api.stripe.com/v1/products', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${state.stripeConfig.secretKey}`,
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          body: new URLSearchParams({
-            name: plan.name,
-            description: plan.description,
-            'metadata[plan_id]': plan.id,
-            'metadata[plan_level]': plan.level.toString(),
-          }),
-        });
-
-        if (!productResponse.ok) {
-          throw new Error('Error al crear producto en Stripe');
-        }
-
-        const product = await productResponse.json();
-        stripeProductId = product.id;
-
-        // Guardar producto en base de datos
-        await supabase
-          .from('stripe_products')
-          .upsert({
-            id: product.id,
-            name: product.name,
-            description: product.description || '',
-            is_active: product.active,
-            metadata: product.metadata || {},
-          });
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        throw new Error('No authentication session found');
       }
 
-      // 2. Crear o actualizar precio en Stripe
-      let stripePriceId = plan.stripePriceId;
-
-      if (!stripePriceId) {
-        // Crear nuevo precio
-        const priceResponse = await fetch('https://api.stripe.com/v1/prices', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${state.stripeConfig.secretKey}`,
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          body: new URLSearchParams({
-            product: stripeProductId,
-            unit_amount: Math.round(plan.price * 100).toString(),
-            currency: plan.currency,
-            'recurring[interval]': plan.interval,
-            'metadata[plan_id]': plan.id,
-          }),
-        });
-
-        if (!priceResponse.ok) {
-          throw new Error('Error al crear precio en Stripe');
-        }
-
-        const price = await priceResponse.json();
-        stripePriceId = price.id;
-
-        // Guardar precio en base de datos
-        await supabase
-          .from('stripe_prices')
-          .upsert({
-            id: price.id,
-            product_id: stripeProductId,
-            amount: price.unit_amount,
-            currency: price.currency,
-            interval: price.recurring?.interval,
-            interval_count: price.recurring?.interval_count,
-            is_active: price.active,
-            metadata: price.metadata || {},
-          });
-      }
-
-      // 3. Actualizar plan con IDs de Stripe
-      const { error } = await supabase
-        .from('plans')
-        .update({
-          stripe_product_id: stripeProductId,
-          stripe_price_id: stripePriceId,
-          updated_at: new Date().toISOString(),
+      const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/sync-plan-with-stripe`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          planId,
+          adminId: state.user?.id
         })
-        .eq('id', planId);
+      });
 
-      if (error) throw error;
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+      }
 
-      // 4. Actualizar estado local
-      const updatedPlan = {
-        ...plan,
-        stripeProductId,
-        stripePriceId,
-        updatedAt: new Date().toISOString(),
-      };
-      dispatch({ type: 'UPDATE_PLAN', payload: updatedPlan });
+      const result = await response.json();
+      
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to sync plan with Stripe');
+      }
 
-      console.log(`✅ Plan ${planId} synced with Stripe successfully`);
-    } catch (error) {
-      console.error(`❌ Error syncing plan ${planId} with Stripe:`, error);
+      console.log(`✅ Plan synced with Stripe successfully: ${planId}`);
+    } catch (error: any) {
+      console.error('❌ Error syncing plan with Stripe:', error);
       throw error;
     }
   };
 
-  // Nueva función: Validar integración con Stripe
+  // 🚀 NUEVA FUNCIÓN: Validar integración de Stripe para un plan
   const validateStripeIntegration = async (planId: string): Promise<boolean> => {
     try {
-      if (!state.stripeConfig) {
-        return false;
+      console.log(`🔄 Validating Stripe integration for plan: ${planId}`);
+      
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        throw new Error('No authentication session found');
       }
 
-      const plan = state.plans.find(p => p.id === planId);
-      if (!plan) {
-        return false;
-      }
-
-      if (plan.isFree) {
-        return true; // Los planes gratuitos no necesitan Stripe
-      }
-
-      if (!plan.stripeProductId || !plan.stripePriceId) {
-        return false;
-      }
-
-      // Verificar que el producto existe en Stripe
-      const productResponse = await fetch(`https://api.stripe.com/v1/products/${plan.stripeProductId}`, {
+      const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/validate-stripe-integration`, {
+        method: 'POST',
         headers: {
-          'Authorization': `Bearer ${state.stripeConfig.secretKey}`,
-        }
+          'Authorization': `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          planId
+        })
       });
 
-      if (!productResponse.ok) {
-        return false;
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
       }
 
-      // Verificar que el precio existe en Stripe
-      const priceResponse = await fetch(`https://api.stripe.com/v1/prices/${plan.stripePriceId}`, {
-        headers: {
-          'Authorization': `Bearer ${state.stripeConfig.secretKey}`,
-        }
-      });
-
-      if (!priceResponse.ok) {
-        return false;
+      const result = await response.json();
+      
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to validate Stripe integration');
       }
 
-      return true;
-    } catch (error) {
-      console.error('Error validating Stripe integration:', error);
+      console.log(`✅ Stripe integration validation result: ${result.valid}`);
+      return result.valid;
+    } catch (error: any) {
+      console.error('❌ Error validating Stripe integration:', error);
       return false;
     }
   };
@@ -1370,10 +1275,12 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
       const newPlan = transformSupabasePlanToAppPlan(data);
       dispatch({ type: 'ADD_PLAN', payload: newPlan });
 
-      // Si no es un plan gratuito y Stripe está configurado, sincronizar automáticamente
+      // Auto-sync with Stripe if not free and Stripe is configured
       if (!newPlan.isFree && state.stripeConfig) {
         try {
           await syncPlanWithStripe(newPlan.id);
+          // Reload plans to get updated Stripe IDs
+          await loadPlans();
         } catch (stripeError) {
           console.warn('Plan created but Stripe sync failed:', stripeError);
         }
@@ -1420,10 +1327,12 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
       const updatedPlan = transformSupabasePlanToAppPlan(data);
       dispatch({ type: 'UPDATE_PLAN', payload: updatedPlan });
 
-      // Si no es un plan gratuito y Stripe está configurado, sincronizar automáticamente
+      // Auto-sync with Stripe if not free and Stripe is configured
       if (!updatedPlan.isFree && state.stripeConfig) {
         try {
           await syncPlanWithStripe(updatedPlan.id);
+          // Reload plans to get updated Stripe IDs
+          await loadPlans();
         } catch (stripeError) {
           console.warn('Plan updated but Stripe sync failed:', stripeError);
         }
