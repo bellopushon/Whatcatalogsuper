@@ -1185,7 +1185,7 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // 🚀 NUEVA FUNCIÓN: Actualizar plan de usuario usando Edge Function
+  // 🚀 FUNCIÓN ACTUALIZADA: Actualizar plan de usuario usando Edge Function
   const updateUserPlan = async (userId: string, newPlan: string) => {
     try {
       console.log(`🔄 Updating user plan via Edge Function: ${userId} -> ${newPlan}`);
@@ -1196,10 +1196,18 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
         throw new Error(`Plan "${newPlan}" no existe`);
       }
 
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        throw new Error('No authentication session found');
+      // Get current session
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError) {
+        console.error('Session error:', sessionError);
+        throw new Error('Error de sesión: ' + sessionError.message);
       }
+
+      if (!session) {
+        throw new Error('No hay sesión de autenticación activa');
+      }
+
+      console.log('🔑 Using session token for Edge Function call');
 
       // Call the sync Edge Function
       const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/sync-user-plan`, {
@@ -1215,12 +1223,24 @@ export function SuperAdminProvider({ children }: { children: ReactNode }) {
         })
       });
 
+      console.log('📡 Edge Function response status:', response.status);
+
       if (!response.ok) {
-        const errorData = await response.json();
+        const errorText = await response.text();
+        console.error('Edge Function error response:', errorText);
+        
+        let errorData;
+        try {
+          errorData = JSON.parse(errorText);
+        } catch {
+          errorData = { error: errorText };
+        }
+        
         throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
       }
 
       const result = await response.json();
+      console.log('📡 Edge Function result:', result);
       
       if (!result.success) {
         throw new Error(result.error || 'Failed to update user plan');
