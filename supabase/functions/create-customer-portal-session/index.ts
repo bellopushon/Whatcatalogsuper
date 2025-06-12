@@ -36,6 +36,21 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    // Get authorization header
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) {
+      return new Response(
+        JSON.stringify({ 
+          success: false,
+          error: 'Authorization header required' 
+        }),
+        { 
+          status: 401, 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        }
+      );
+    }
+
     // Create Supabase admin client
     const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, {
       auth: {
@@ -44,11 +59,56 @@ Deno.serve(async (req: Request) => {
       }
     });
 
+    // Create client with user token for authentication
+    const supabaseClient = createClient(supabaseUrl, Deno.env.get('SUPABASE_ANON_KEY') || '', {
+      global: {
+        headers: {
+          Authorization: authHeader,
+        },
+      },
+    });
+
+    // Verify user authentication and get current user
+    const { data: { user }, error: authError } = await supabaseClient.auth.getUser();
+    
+    if (authError || !user) {
+      return new Response(
+        JSON.stringify({ 
+          success: false,
+          error: 'Authentication failed' 
+        }),
+        { 
+          status: 401, 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        }
+      );
+    }
+
+    // Verify super admin privileges
+    const { data: adminUser, error: adminError } = await supabaseAdmin
+      .from('users')
+      .select('email')
+      .eq('id', user.id)
+      .single();
+
+    if (adminError || !adminUser || adminUser.email !== 'the.genio27@gmail.com') {
+      return new Response(
+        JSON.stringify({ 
+          success: false,
+          error: 'Unauthorized: Super admin access required' 
+        }),
+        { 
+          status: 403, 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        }
+      );
+    }
+
     const { userId, returnUrl }: CreatePortalSessionRequest = await req.json();
 
-    console.log(`📋 Creating portal session for user: ${userId}`);
+    console.log(`📋 Creating portal session for user: ${userId} by admin: ${user.id}`);
 
-    // 1. Get user data
+    // 1. Get target user data
     const { data: userData, error: userError } = await supabaseAdmin
       .from('users')
       .select('*')
@@ -226,6 +286,23 @@ Deno.serve(async (req: Request) => {
       const basicSession = await basicPortalResponse.json();
       console.log(`✅ Basic portal session created: ${basicSession.id}`);
 
+      // Log portal access with correct admin_id
+      await supabaseAdmin
+        .from('system_logs')
+        .insert({
+          admin_id: user.id, // Correct: ID of the super admin who initiated the action
+          action: 'stripe_portal_access',
+          object_type: 'subscription',
+          object_id: stripeCustomerId,
+          details: {
+            target_user_id: userId, // Include the target user ID for clarity
+            session_id: basicSession.id,
+            environment: 'development',
+            mode: 'basic',
+            timestamp: new Date().toISOString()
+          }
+        });
+
       return new Response(
         JSON.stringify({
           success: true,
@@ -243,17 +320,19 @@ Deno.serve(async (req: Request) => {
 
     console.log(`✅ Enhanced portal session created: ${session.id}`);
 
-    // 5. Log portal access for development tracking
+    // 5. Log portal access for development tracking with correct admin_id
     await supabaseAdmin
       .from('system_logs')
       .insert({
-        admin_id: userId,
+        admin_id: user.id, // Correct: ID of the super admin who initiated the action
         action: 'stripe_portal_access',
         object_type: 'subscription',
         object_id: stripeCustomerId,
         details: {
+          target_user_id: userId, // Include the target user ID for clarity
           session_id: session.id,
           environment: 'development',
+          mode: 'enhanced',
           timestamp: new Date().toISOString()
         }
       });
