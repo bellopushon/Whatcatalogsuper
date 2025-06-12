@@ -177,7 +177,7 @@ async function handleCheckoutCompleted(event: StripeEvent, supabaseUrl: string, 
   }
 
   if (userId) {
-    // Update user's plan
+    // Update user's plan and save stripe_customer_id
     await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${userId}`, {
       method: 'PATCH',
       headers: {
@@ -189,12 +189,13 @@ async function handleCheckoutCompleted(event: StripeEvent, supabaseUrl: string, 
         plan: planId,
         subscription_status: 'active',
         subscription_id: session.subscription,
+        stripe_customer_id: session.customer, // Fix: Save the Stripe customer ID
         subscription_start_date: new Date().toISOString(),
         updated_at: new Date().toISOString()
       })
     });
 
-    console.log(`✅ Updated user ${userId} to plan ${planId}`);
+    console.log(`✅ Updated user ${userId} to plan ${planId} with customer ID ${session.customer}`);
   }
 
   // Store transaction
@@ -249,6 +250,18 @@ async function handlePaymentSucceeded(event: StripeEvent, supabaseUrl: string, s
   // Update user subscription if this is a subscription payment
   const metadata = paymentIntent.metadata || {};
   if (metadata.user_id && metadata.plan_id) {
+    // Also update stripe_customer_id if available
+    const updateData: any = {
+      plan: metadata.plan_id,
+      subscription_status: 'active',
+      subscription_start_date: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+
+    if (paymentIntent.customer) {
+      updateData.stripe_customer_id = paymentIntent.customer;
+    }
+
     await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${metadata.user_id}`, {
       method: 'PATCH',
       headers: {
@@ -256,12 +269,7 @@ async function handlePaymentSucceeded(event: StripeEvent, supabaseUrl: string, s
         'apikey': serviceRoleKey,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        plan: metadata.plan_id,
-        subscription_status: 'active',
-        subscription_start_date: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      })
+      body: JSON.stringify(updateData)
     });
   }
 }
@@ -298,7 +306,7 @@ async function handleSubscriptionChange(event: StripeEvent, supabaseUrl: string,
   
   // Find user by customer ID
   const customerResponse = await fetch(
-    `${supabaseUrl}/rest/v1/stripe_transactions?select=user_id&customer_id=eq.${subscription.customer}&limit=1`,
+    `${supabaseUrl}/rest/v1/users?select=id&stripe_customer_id=eq.${subscription.customer}&limit=1`,
     {
       headers: {
         'Authorization': `Bearer ${serviceRoleKey}`,
@@ -308,9 +316,9 @@ async function handleSubscriptionChange(event: StripeEvent, supabaseUrl: string,
   );
   
   if (customerResponse.ok) {
-    const transactions = await customerResponse.json();
-    if (transactions.length > 0) {
-      const userId = transactions[0].user_id;
+    const users = await customerResponse.json();
+    if (users.length > 0) {
+      const userId = users[0].id;
       
       // Map Stripe status to database enum value
       const mappedStatus = mapStripeStatusToDbStatus(subscription.status);
@@ -333,6 +341,47 @@ async function handleSubscriptionChange(event: StripeEvent, supabaseUrl: string,
       });
 
       console.log(`✅ Updated user ${userId} subscription status: ${subscription.status} -> ${mappedStatus}`);
+    }
+  } else {
+    // Fallback: try to find user by customer ID in transactions
+    const transactionResponse = await fetch(
+      `${supabaseUrl}/rest/v1/stripe_transactions?select=user_id&customer_id=eq.${subscription.customer}&limit=1`,
+      {
+        headers: {
+          'Authorization': `Bearer ${serviceRoleKey}`,
+          'apikey': serviceRoleKey
+        }
+      }
+    );
+    
+    if (transactionResponse.ok) {
+      const transactions = await transactionResponse.json();
+      if (transactions.length > 0) {
+        const userId = transactions[0].user_id;
+        
+        // Map Stripe status to database enum value
+        const mappedStatus = mapStripeStatusToDbStatus(subscription.status);
+        
+        // Update user subscription and ensure stripe_customer_id is set
+        await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${userId}`, {
+          method: 'PATCH',
+          headers: {
+            'Authorization': `Bearer ${serviceRoleKey}`,
+            'apikey': serviceRoleKey,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            subscription_id: subscription.id,
+            subscription_status: mappedStatus,
+            stripe_customer_id: subscription.customer, // Ensure customer ID is saved
+            subscription_start_date: new Date(subscription.current_period_start * 1000).toISOString(),
+            subscription_end_date: new Date(subscription.current_period_end * 1000).toISOString(),
+            updated_at: new Date().toISOString()
+          })
+        });
+
+        console.log(`✅ Updated user ${userId} subscription status: ${subscription.status} -> ${mappedStatus}`);
+      }
     }
   }
 }
