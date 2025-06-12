@@ -20,7 +20,7 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    console.log('🔄 Creating payment session for plan');
+    console.log('🔄 Creating payment session for development environment');
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
@@ -169,7 +169,8 @@ Deno.serve(async (req: Request) => {
           email: userEmail,
           name: userName,
           'metadata[user_id]': userId || '',
-          'metadata[plan_id]': planId
+          'metadata[plan_id]': planId,
+          'metadata[environment]': 'development'
         })
       });
 
@@ -180,33 +181,53 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // 5. Create Stripe checkout session
+    // 5. Create Stripe checkout session with enhanced development features
     const sessionParams = new URLSearchParams({
       'mode': 'subscription',
       'success_url': successUrl,
       'cancel_url': cancelUrl,
-      'line_items[0][price_data][currency]': 'usd',
-      'line_items[0][price_data][product_data][name]': plan.name,
-      'line_items[0][price_data][product_data][description]': plan.description,
-      'line_items[0][price_data][unit_amount]': Math.round(plan.price * 100).toString(),
-      'line_items[0][price_data][recurring][interval]': 'month',
-      'line_items[0][quantity]': '1',
+      'allow_promotion_codes': 'true',
+      'billing_address_collection': 'auto',
+      'customer_update[address]': 'auto',
+      'customer_update[name]': 'auto',
+      'customer_update[shipping]': 'auto',
+      'tax_id_collection[enabled]': 'true',
+      'consent_collection[terms_of_service]': 'required',
+      'consent_collection[promotions]': 'auto',
       'metadata[user_id]': userId || '',
       'metadata[user_email]': userEmail,
       'metadata[plan_id]': planId,
       'metadata[plan_name]': plan.name,
       'metadata[plan_price]': plan.price.toString(),
-      'allow_promotion_codes': 'true',
-      'billing_address_collection': 'auto',
-      'customer_update[address]': 'auto',
-      'customer_update[name]': 'auto'
+      'metadata[environment]': 'development'
     });
+
+    // Use Stripe Price ID if available, otherwise create inline price
+    if (plan.stripe_price_id) {
+      sessionParams.append('line_items[0][price]', plan.stripe_price_id);
+      sessionParams.append('line_items[0][quantity]', '1');
+    } else {
+      // Create inline price for development
+      sessionParams.append('line_items[0][price_data][currency]', plan.currency || 'usd');
+      sessionParams.append('line_items[0][price_data][product_data][name]', plan.name);
+      sessionParams.append('line_items[0][price_data][product_data][description]', plan.description);
+      sessionParams.append('line_items[0][price_data][unit_amount]', Math.round(plan.price * 100).toString());
+      sessionParams.append('line_items[0][price_data][recurring][interval]', plan.interval || 'month');
+      sessionParams.append('line_items[0][quantity]', '1');
+    }
 
     if (customerId) {
       sessionParams.append('customer', customerId);
     } else {
       sessionParams.append('customer_email', userEmail);
     }
+
+    // Add development-specific features
+    sessionParams.append('payment_method_collection', 'if_required');
+    sessionParams.append('invoice_creation[enabled]', 'true');
+    sessionParams.append('subscription_data[trial_period_days]', '0'); // No trial for development
+    sessionParams.append('subscription_data[metadata][environment]', 'development');
+    sessionParams.append('subscription_data[metadata][plan_id]', planId);
 
     const stripeResponse = await fetch('https://api.stripe.com/v1/checkout/sessions', {
       method: 'POST',
@@ -235,7 +256,7 @@ Deno.serve(async (req: Request) => {
 
     const session = await stripeResponse.json();
 
-    console.log(`✅ Payment session created: ${session.id}`);
+    console.log(`✅ Development payment session created: ${session.id}`);
 
     return new Response(
       JSON.stringify({
@@ -245,8 +266,16 @@ Deno.serve(async (req: Request) => {
         plan: {
           id: plan.id,
           name: plan.name,
-          price: plan.price
-        }
+          price: plan.price,
+          currency: plan.currency || 'usd',
+          interval: plan.interval || 'month'
+        },
+        customer: {
+          id: customerId,
+          email: userEmail
+        },
+        environment: 'development',
+        message: 'Sesión de pago creada para entorno de desarrollo'
       }),
       { 
         headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
