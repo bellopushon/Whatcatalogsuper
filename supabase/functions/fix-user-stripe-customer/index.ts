@@ -14,6 +14,25 @@ interface FixUserRequest {
   adminId?: string;
 }
 
+// Helper function to map Stripe subscription status to database enum values
+function mapStripeStatusToDbStatus(stripeStatus: string): 'active' | 'canceled' | 'expired' {
+  switch (stripeStatus) {
+    case 'active':
+    case 'trialing':
+    case 'past_due':
+    case 'unpaid':
+      return 'active';
+    case 'canceled':
+      return 'canceled';
+    case 'incomplete_expired':
+    case 'ended':
+      return 'expired';
+    case 'incomplete':
+    default:
+      return 'active'; // Default to active for incomplete or unknown statuses
+  }
+}
+
 Deno.serve(async (req: Request) => {
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
@@ -267,11 +286,12 @@ Deno.serve(async (req: Request) => {
         subscriptionId = subscription.id;
         
         updateData.subscription_id = subscriptionId;
-        updateData.subscription_status = subscription.status;
+        // Map Stripe status to database enum value
+        updateData.subscription_status = mapStripeStatusToDbStatus(subscription.status);
         updateData.subscription_start_date = new Date(subscription.current_period_start * 1000).toISOString();
         updateData.subscription_end_date = new Date(subscription.current_period_end * 1000).toISOString();
         
-        console.log(`✅ Created subscription: ${subscriptionId}`);
+        console.log(`✅ Created subscription: ${subscriptionId} with status: ${subscription.status} -> ${updateData.subscription_status}`);
       } else {
         const errorText = await subscriptionResponse.text();
         console.warn('Could not create subscription:', errorText);
@@ -295,7 +315,8 @@ Deno.serve(async (req: Request) => {
         return new Response(
           JSON.stringify({ 
             error: 'Error al actualizar usuario',
-            code: 'USER_UPDATE_ERROR'
+            code: 'USER_UPDATE_ERROR',
+            details: updateError.message
           }),
           { 
             status: 500, 

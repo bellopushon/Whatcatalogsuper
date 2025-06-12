@@ -12,6 +12,25 @@ interface StripeEvent {
   };
 }
 
+// Helper function to map Stripe subscription status to database enum values
+function mapStripeStatusToDbStatus(stripeStatus: string): 'active' | 'canceled' | 'expired' {
+  switch (stripeStatus) {
+    case 'active':
+    case 'trialing':
+    case 'past_due':
+    case 'unpaid':
+      return 'active';
+    case 'canceled':
+      return 'canceled';
+    case 'incomplete_expired':
+    case 'ended':
+      return 'expired';
+    case 'incomplete':
+    default:
+      return 'active'; // Default to active for incomplete or unknown statuses
+  }
+}
+
 Deno.serve(async (req: Request) => {
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
@@ -293,6 +312,9 @@ async function handleSubscriptionChange(event: StripeEvent, supabaseUrl: string,
     if (transactions.length > 0) {
       const userId = transactions[0].user_id;
       
+      // Map Stripe status to database enum value
+      const mappedStatus = mapStripeStatusToDbStatus(subscription.status);
+      
       // Update user subscription
       await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${userId}`, {
         method: 'PATCH',
@@ -303,12 +325,14 @@ async function handleSubscriptionChange(event: StripeEvent, supabaseUrl: string,
         },
         body: JSON.stringify({
           subscription_id: subscription.id,
-          subscription_status: subscription.status,
+          subscription_status: mappedStatus,
           subscription_start_date: new Date(subscription.current_period_start * 1000).toISOString(),
           subscription_end_date: new Date(subscription.current_period_end * 1000).toISOString(),
           updated_at: new Date().toISOString()
         })
       });
+
+      console.log(`✅ Updated user ${userId} subscription status: ${subscription.status} -> ${mappedStatus}`);
     }
   }
 }

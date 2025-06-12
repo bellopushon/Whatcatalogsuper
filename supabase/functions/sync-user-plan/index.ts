@@ -162,27 +162,11 @@ Deno.serve(async (req: Request) => {
 
     const oldPlanId = userData.plan;
 
-    // Step 3: Map plan name to enum value
-    // The users.plan column expects enum values: 'gratuito', 'emprendedor', 'profesional'
-    let planEnumValue: string;
-    
-    // Map plan names to enum values based on common naming patterns
-    const planName = planData.name.toLowerCase();
-    if (planName.includes('gratuito') || planName.includes('free') || planName.includes('básico')) {
-      planEnumValue = 'gratuito';
-    } else if (planName.includes('emprendedor') || planName.includes('entrepreneur') || planName.includes('starter')) {
-      planEnumValue = 'emprendedor';
-    } else if (planName.includes('profesional') || planName.includes('professional') || planName.includes('pro')) {
-      planEnumValue = 'profesional';
-    } else {
-      // Default fallback - you might want to adjust this logic based on your specific plan structure
-      planEnumValue = 'gratuito';
-    }
-
-    // Step 4: Update user plan with the correct enum value
+    // Step 3: Update user plan with the UUID directly
+    // The users.plan column expects a UUID reference to the plans table, not an enum value
     const { data: updatedUser, error: updateError } = await supabaseAdmin
       .from('users')
-      .update({ plan: planEnumValue })
+      .update({ plan: newPlanId })
       .eq('id', userId)
       .select()
       .single();
@@ -201,7 +185,7 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Step 5: Log the action in system_logs
+    // Step 4: Log the action in system_logs
     const { error: logError } = await supabaseAdmin
       .from('system_logs')
       .insert({
@@ -214,7 +198,6 @@ Deno.serve(async (req: Request) => {
           newPlanId,
           oldPlanName: oldPlanId,
           newPlanName: planData.name,
-          planEnumValue,
           timestamp: new Date().toISOString()
         },
         ip_address: req.headers.get('x-forwarded-for') || 'unknown'
@@ -224,7 +207,7 @@ Deno.serve(async (req: Request) => {
       console.warn('Failed to log action:', logError);
     }
 
-    console.log(`✅ User plan updated successfully: ${userId} -> ${newPlanId} (${planEnumValue})`);
+    console.log(`✅ User plan updated successfully: ${userId} -> ${newPlanId}`);
 
     return new Response(
       JSON.stringify({
@@ -235,8 +218,7 @@ Deno.serve(async (req: Request) => {
         changes: {
           oldPlanId,
           newPlanId,
-          planName: planData.name,
-          planEnumValue
+          planName: planData.name
         }
       }),
       { 
