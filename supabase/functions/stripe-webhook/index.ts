@@ -1,482 +1,491 @@
+import { createClient } from "npm:@supabase/supabase-js@2.43.4";
+import Stripe from "npm:stripe@14.21.0";
 const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, stripe-signature',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type"
 };
-
-interface StripeEvent {
-  id: string;
-  type: string;
-  data: {
-    object: any;
-  };
-}
-
-// Helper function to map Stripe subscription status to database enum values
-function mapStripeStatusToDbStatus(stripeStatus: string): 'active' | 'canceled' | 'expired' {
-  switch (stripeStatus) {
-    case 'active':
-    case 'trialing':
-    case 'past_due':
-    case 'unpaid':
-      return 'active';
-    case 'canceled':
-      return 'canceled';
-    case 'incomplete_expired':
-    case 'ended':
-      return 'expired';
-    case 'incomplete':
-    default:
-      return 'active'; // Default to active for incomplete or unknown statuses
-  }
-}
-
-Deno.serve(async (req: Request) => {
-  // Handle CORS preflight requests
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders });
-  }
-
+Deno.serve(async (req)=>{
   try {
-    console.log('🔄 Stripe webhook received');
-
-    const supabaseUrl = Deno.env.get('SUPABASE_URL');
-    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-
-    if (!supabaseUrl || !serviceRoleKey) {
-      console.error('Missing environment variables');
-      return new Response('Server configuration error', { status: 500 });
+    // Handle CORS preflight request
+    if (req.method === "OPTIONS") {
+      return new Response(null, {
+        headers: corsHeaders,
+        status: 204
+      });
     }
-
-    // Get the raw body for signature verification
-    const body = await req.text();
-    const signature = req.headers.get('stripe-signature');
-
+    // Get environment variables
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    const stripeSecretKey = Deno.env.get("STRIPE_SECRET_KEY");
+    const stripeWebhookSecret = Deno.env.get("STRIPE_WEBHOOK_SECRET");
+    if (!supabaseUrl || !supabaseServiceKey || !stripeSecretKey || !stripeWebhookSecret) {
+      console.error("Missing required environment variables:", {
+        hasSupabaseUrl: !!supabaseUrl,
+        hasSupabaseServiceKey: !!supabaseServiceKey,
+        hasStripeSecretKey: !!stripeSecretKey,
+        hasStripeWebhookSecret: !!stripeWebhookSecret
+      });
+      throw new Error("Required environment variables are missing");
+    }
+    // Initialize Supabase client with service role key
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+    // Initialize Stripe
+    const stripe = new Stripe(stripeSecretKey, {
+      apiVersion: "2023-10-16"
+    });
+    // Get the signature from the headers
+    const signature = req.headers.get("stripe-signature");
     if (!signature) {
-      console.error('Missing Stripe signature');
-      return new Response('Missing signature', { status: 400 });
+      console.error("No Stripe signature provided");
+      return new Response(JSON.stringify({
+        error: "No signature provided",
+        message: "No se proporcionó firma de Stripe."
+      }), {
+        status: 400,
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/json"
+        }
+      });
     }
-
-    // Parse the event
-    let event: StripeEvent;
+    // Get the raw body
+    const body = await req.text();
+    console.log("Received webhook body:", body.substring(0, 200) + "...");
+    // Verify the webhook signature
+    let event;
     try {
-      event = JSON.parse(body);
+      event = stripe.webhooks.constructEvent(body, signature, stripeWebhookSecret);
+      console.log("Webhook signature verified successfully");
     } catch (err) {
-      console.error('Invalid JSON:', err);
-      return new Response('Invalid JSON', { status: 400 });
+      console.error(`Webhook signature verification failed: ${err.message}`);
+      return new Response(JSON.stringify({
+        error: `Webhook Error: ${err.message}`,
+        message: "Error de verificación de webhook."
+      }), {
+        status: 400,
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/json"
+        }
+      });
     }
-
-    console.log(`📨 Processing Stripe event: ${event.type}`);
-
-    // Store webhook event
-    const webhookResponse = await fetch(`${supabaseUrl}/rest/v1/stripe_webhooks`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${serviceRoleKey}`,
-        'apikey': serviceRoleKey,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        stripe_event_id: event.id,
-        event_type: event.type,
-        data: event.data,
-        processed: false
-      })
-    });
-
-    if (!webhookResponse.ok) {
-      console.error('Failed to store webhook event');
+    console.log(`Processing webhook event: ${event.type}, id: ${event.id}`);
+    // Store the webhook event in the database
+    const { data: webhookData, error: webhookError } = await supabase.from("stripe_webhooks").insert({
+      stripe_event_id: event.id,
+      event_type: event.type,
+      data: event
+    }).select().single();
+    if (webhookError) {
+      console.error("Error storing webhook:", webhookError);
+    // Continue processing even if storing fails
+    } else {
+      console.log("Webhook stored in database with ID:", webhookData.id);
     }
-
-    // Process different event types
-    switch (event.type) {
-      case 'checkout.session.completed':
-        await handleCheckoutCompleted(event, supabaseUrl, serviceRoleKey);
-        break;
-      
-      case 'payment_intent.succeeded':
-        await handlePaymentSucceeded(event, supabaseUrl, serviceRoleKey);
-        break;
-      
-      case 'payment_intent.payment_failed':
-        await handlePaymentFailed(event, supabaseUrl, serviceRoleKey);
-        break;
-      
-      case 'customer.subscription.created':
-      case 'customer.subscription.updated':
-        await handleSubscriptionChange(event, supabaseUrl, serviceRoleKey);
-        break;
-      
-      case 'customer.subscription.deleted':
-        await handleSubscriptionDeleted(event, supabaseUrl, serviceRoleKey);
-        break;
-      
-      case 'invoice.payment_succeeded':
-        await handleInvoicePaymentSucceeded(event, supabaseUrl, serviceRoleKey);
-        break;
-      
+    // Process the event based on its type
+    let statusCode = 200;
+    let responseBody = {
+      received: true
+    };
+    switch(event.type){
+      case "checkout.session.completed":
+        {
+          console.log("Processing checkout.session.completed event");
+          const session = event.data.object;
+          // Get the customer and subscription IDs
+          const customerId = session.customer;
+          const subscriptionId = session.subscription;
+          // Get metadata from the session
+          const userId = session.metadata?.userId;
+          const planId = session.metadata?.planId;
+          console.log("Session metadata:", {
+            userId,
+            planId,
+            customerId,
+            subscriptionId
+          });
+          if (userId && planId) {
+            // Calculate subscription end date (30 days from now)
+            const subscriptionEndDate = new Date();
+            subscriptionEndDate.setDate(subscriptionEndDate.getDate() + 30);
+            // Get plan details
+            const { data: planData, error: planError } = await supabase.from("plans").select("*").eq("id", planId).single();
+            if (planError) {
+              console.error("Error fetching plan:", planError);
+            // Continue with default values
+            } else {
+              console.log("Found plan:", planData);
+            }
+            // Update user in database
+            const { error: updateError } = await supabase.from("users").update({
+              plan: planId,
+              subscription_id: subscriptionId,
+              subscription_status: "active",
+              subscription_start_date: new Date().toISOString(),
+              subscription_end_date: subscriptionEndDate.toISOString(),
+              stripe_customer_id: customerId,
+              payment_method: "stripe",
+              updated_at: new Date().toISOString()
+            }).eq("id", userId);
+            if (updateError) {
+              console.error("Error updating user:", updateError);
+              statusCode = 500;
+              responseBody = {
+                error: "Error updating user",
+                details: updateError
+              };
+            } else {
+              console.log("User updated successfully with plan:", planId);
+              // Record the transaction
+              const { error: transactionError } = await supabase.from("stripe_transactions").insert({
+                id: `txn_${subscriptionId}`,
+                user_id: userId,
+                customer_id: customerId,
+                amount: session.amount_total || 0,
+                currency: session.currency || "usd",
+                status: "succeeded",
+                payment_method: "stripe",
+                subscription_id: subscriptionId,
+                metadata: {
+                  plan_id: planId,
+                  session_id: session.id
+                }
+              });
+              if (transactionError) {
+                console.error("Error recording transaction:", transactionError);
+              // Continue anyway as user update was successful
+              } else {
+                console.log("Transaction recorded successfully");
+              }
+            }
+          } else {
+            console.error("Missing userId or planId in session metadata");
+            statusCode = 400;
+            responseBody = {
+              error: "Missing userId or planId in session metadata",
+              details: {
+                userId,
+                planId
+              }
+            };
+          }
+          break;
+        }
+      case "customer.subscription.updated":
+        {
+          console.log("Processing customer.subscription.updated event");
+          const subscription = event.data.object;
+          // Get the customer ID and status
+          const customerId = subscription.customer;
+          const status = subscription.status;
+          console.log("Subscription details:", {
+            customerId,
+            status,
+            subscriptionId: subscription.id
+          });
+          // Map Stripe status to our status
+          let appStatus;
+          switch(status){
+            case "active":
+              appStatus = "active";
+              break;
+            case "canceled":
+              appStatus = "canceled";
+              break;
+            case "unpaid":
+            case "past_due":
+              appStatus = "expired";
+              break;
+            default:
+              appStatus = status;
+          }
+          // Find user by customer ID
+          const { data: userData, error: userError } = await supabase.from("users").select("id").eq("stripe_customer_id", customerId).single();
+          if (userError) {
+            console.error("Error finding user by customer ID:", userError);
+            statusCode = 404;
+            responseBody = {
+              error: "User not found",
+              details: {
+                customerId
+              }
+            };
+          } else {
+            console.log("Found user:", userData);
+            // Update user in database
+            const { error: updateError } = await supabase.from("users").update({
+              subscription_status: appStatus,
+              updated_at: new Date().toISOString()
+            }).eq("id", userData.id);
+            if (updateError) {
+              console.error("Error updating user subscription:", updateError);
+              statusCode = 500;
+              responseBody = {
+                error: "Error updating user subscription",
+                details: updateError
+              };
+            } else {
+              console.log("User subscription status updated to:", appStatus);
+            }
+          }
+          break;
+        }
+      case "customer.subscription.deleted":
+        {
+          console.log("Processing customer.subscription.deleted event");
+          const subscription = event.data.object;
+          // Get the customer ID
+          const customerId = subscription.customer;
+          console.log("Subscription deleted for customer:", customerId);
+          // Find user by customer ID
+          const { data: userData, error: userError } = await supabase.from("users").select("id").eq("stripe_customer_id", customerId).single();
+          if (userError) {
+            console.error("Error finding user by customer ID:", userError);
+            statusCode = 404;
+            responseBody = {
+              error: "User not found",
+              details: {
+                customerId
+              }
+            };
+          } else {
+            console.log("Found user:", userData);
+            // Update user in database
+            const { error: updateError } = await supabase.from("users").update({
+              subscription_status: "canceled",
+              subscription_canceled_at: new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            }).eq("id", userData.id);
+            if (updateError) {
+              console.error("Error updating user subscription:", updateError);
+              statusCode = 500;
+              responseBody = {
+                error: "Error updating user subscription",
+                details: updateError
+              };
+            } else {
+              console.log("User subscription marked as canceled");
+            }
+          }
+          break;
+        }
+      case "invoice.payment_succeeded":
+        {
+          console.log("Processing invoice.payment_succeeded event");
+          const invoice = event.data.object;
+          // Get the customer ID and subscription ID
+          const customerId = invoice.customer;
+          const subscriptionId = invoice.subscription;
+          if (!customerId) {
+            console.error("No customer ID in invoice");
+            break;
+          }
+          // Record the transaction
+          const { error: transactionError } = await supabase.from("stripe_transactions").insert({
+            id: `inv_${invoice.id}`,
+            user_id: null,
+            customer_id: customerId,
+            amount: invoice.amount_paid,
+            currency: invoice.currency,
+            status: "succeeded",
+            payment_method: "stripe",
+            subscription_id: subscriptionId,
+            metadata: {
+              invoice_id: invoice.id,
+              invoice_number: invoice.number
+            }
+          });
+          if (transactionError) {
+            console.error("Error recording transaction:", transactionError);
+          } else {
+            console.log("Transaction recorded successfully");
+            // Find and update the user ID in the transaction
+            const { data: userData, error: userError } = await supabase.from("users").select("id").eq("stripe_customer_id", customerId).single();
+            if (!userError && userData) {
+              const { error: updateError } = await supabase.from("stripe_transactions").update({
+                user_id: userData.id
+              }).eq("id", `inv_${invoice.id}`);
+              if (updateError) {
+                console.error("Error updating transaction with user ID:", updateError);
+              } else {
+                console.log("Transaction updated with user ID:", userData.id);
+              }
+            }
+          }
+          break;
+        }
+      case "payment_intent.succeeded":
+        {
+          console.log("Processing payment_intent.succeeded event");
+          const paymentIntent = event.data.object;
+          // Get the customer ID
+          const customerId = paymentIntent.customer;
+          if (!customerId) {
+            console.error("No customer ID in payment intent");
+            break;
+          }
+          // Record the transaction
+          const { error: transactionError } = await supabase.from("stripe_transactions").insert({
+            id: `pi_${paymentIntent.id}`,
+            user_id: null,
+            customer_id: customerId,
+            amount: paymentIntent.amount,
+            currency: paymentIntent.currency,
+            status: "succeeded",
+            payment_method: paymentIntent.payment_method_types?.[0] || "stripe",
+            metadata: {
+              payment_intent_id: paymentIntent.id
+            }
+          });
+          if (transactionError) {
+            console.error("Error recording transaction:", transactionError);
+          } else {
+            console.log("Transaction recorded successfully");
+            // Find and update the user ID in the transaction
+            const { data: userData, error: userError } = await supabase.from("users").select("id").eq("stripe_customer_id", customerId).single();
+            if (!userError && userData) {
+              const { error: updateError } = await supabase.from("stripe_transactions").update({
+                user_id: userData.id
+              }).eq("id", `pi_${paymentIntent.id}`);
+              if (updateError) {
+                console.error("Error updating transaction with user ID:", updateError);
+              } else {
+                console.log("Transaction updated with user ID:", userData.id);
+              }
+            }
+          }
+          break;
+        }
+      case "customer.subscription.created":
+        {
+          console.log("Processing customer.subscription.created event");
+          const subscription = event.data.object;
+          // Get the customer ID, subscription ID, and plan ID
+          const customerId = subscription.customer;
+          const subscriptionId = subscription.id;
+          const planId = subscription.plan?.metadata?.plan_id;
+          console.log("Subscription created:", {
+            customerId,
+            subscriptionId,
+            planId,
+            status: subscription.status
+          });
+          if (!customerId) {
+            console.error("No customer ID in subscription");
+            break;
+          }
+          // Find user by customer ID
+          const { data: userData, error: userError } = await supabase.from("users").select("id").eq("stripe_customer_id", customerId).single();
+          if (userError) {
+            console.error("Error finding user by customer ID:", userError);
+            break;
+          }
+          console.log("Found user:", userData);
+          // If we have a plan ID from metadata, update the user's plan
+          if (planId) {
+            // Calculate subscription end date based on billing cycle
+            const subscriptionEndDate = new Date(subscription.current_period_end * 1000);
+            // Update user in database
+            const { error: updateError } = await supabase.from("users").update({
+              plan: planId,
+              subscription_id: subscriptionId,
+              subscription_status: subscription.status,
+              subscription_start_date: new Date(subscription.current_period_start * 1000).toISOString(),
+              subscription_end_date: subscriptionEndDate.toISOString(),
+              updated_at: new Date().toISOString()
+            }).eq("id", userData.id);
+            if (updateError) {
+              console.error("Error updating user with subscription:", updateError);
+            } else {
+              console.log("User updated with subscription and plan:", planId);
+            }
+          } else {
+            console.log("No plan ID in subscription metadata, using product lookup");
+            // Try to find the plan by product ID
+            const productId = subscription.plan?.product;
+            if (productId) {
+              const { data: planData, error: planError } = await supabase.from("plans").select("id").eq("stripe_product_id", productId).single();
+              if (planError) {
+                console.error("Error finding plan by product ID:", planError);
+              } else if (planData) {
+                console.log("Found plan by product ID:", planData);
+                // Calculate subscription end date based on billing cycle
+                const subscriptionEndDate = new Date(subscription.current_period_end * 1000);
+                // Update user in database
+                const { error: updateError } = await supabase.from("users").update({
+                  plan: planData.id,
+                  subscription_id: subscriptionId,
+                  subscription_status: subscription.status,
+                  subscription_start_date: new Date(subscription.current_period_start * 1000).toISOString(),
+                  subscription_end_date: subscriptionEndDate.toISOString(),
+                  updated_at: new Date().toISOString()
+                }).eq("id", userData.id);
+                if (updateError) {
+                  console.error("Error updating user with subscription:", updateError);
+                } else {
+                  console.log("User updated with subscription and plan:", planData.id);
+                }
+              }
+            }
+          }
+          // Record the subscription in the database
+          const { error: subscriptionError } = await supabase.from("subscriptions").insert({
+            user_id: userData.id,
+            plan_id: planId,
+            stripe_subscription_id: subscriptionId,
+            stripe_customer_id: customerId,
+            status: subscription.status,
+            current_period_start: new Date(subscription.current_period_start * 1000).toISOString(),
+            current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
+            cancel_at_period_end: subscription.cancel_at_period_end,
+            payment_method: "stripe",
+            metadata: {
+              product_id: subscription.plan?.product
+            }
+          });
+          if (subscriptionError) {
+            console.error("Error recording subscription:", subscriptionError);
+          } else {
+            console.log("Subscription recorded successfully");
+          }
+          break;
+        }
+      // Add more event types as needed
       default:
-        console.log(`ℹ️ Unhandled event type: ${event.type}`);
+        // Unhandled event type
+        console.log(`Unhandled event type: ${event.type}`);
     }
-
-    // Mark webhook as processed
-    await fetch(`${supabaseUrl}/rest/v1/stripe_webhooks?stripe_event_id=eq.${event.id}`, {
-      method: 'PATCH',
+    // Update webhook record as processed
+    if (webhookData) {
+      await supabase.from("stripe_webhooks").update({
+        processed: true
+      }).eq("id", webhookData.id);
+      console.log("Webhook marked as processed");
+    }
+    return new Response(JSON.stringify(responseBody), {
+      status: statusCode,
       headers: {
-        'Authorization': `Bearer ${serviceRoleKey}`,
-        'apikey': serviceRoleKey,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ processed: true })
+        ...corsHeaders,
+        "Content-Type": "application/json"
+      }
     });
-
-    console.log('✅ Webhook processed successfully');
-    return new Response('OK', { status: 200 });
-
   } catch (error) {
-    console.error('❌ Webhook processing error:', error);
-    return new Response('Internal server error', { status: 500 });
+    console.error("Error processing webhook:", error);
+    console.error("Error details:", {
+      name: error.name,
+      message: error.message,
+      stack: error.stack
+    });
+    return new Response(JSON.stringify({
+      error: "Error interno del servidor",
+      message: error.message,
+      details: error.stack
+    }), {
+      status: 500,
+      headers: {
+        ...corsHeaders,
+        "Content-Type": "application/json"
+      }
+    });
   }
 });
-
-async function handleCheckoutCompleted(event: StripeEvent, supabaseUrl: string, serviceRoleKey: string) {
-  const session = event.data.object;
-  
-  console.log(`🛒 Checkout completed: ${session.id}`);
-  
-  const metadata = session.metadata || {};
-  const userEmail = metadata.user_email || session.customer_details?.email;
-  const planId = metadata.plan_id;
-  
-  if (!userEmail || !planId) {
-    console.error('Missing user email or plan ID in checkout session');
-    return;
-  }
-
-  // Find or create user
-  let userId = metadata.user_id;
-  
-  if (!userId) {
-    // Try to find user by email
-    const userResponse = await fetch(
-      `${supabaseUrl}/rest/v1/users?select=id&email=eq.${userEmail}&limit=1`,
-      {
-        headers: {
-          'Authorization': `Bearer ${serviceRoleKey}`,
-          'apikey': serviceRoleKey
-        }
-      }
-    );
-
-    if (userResponse.ok) {
-      const users = await userResponse.json();
-      if (users.length > 0) {
-        userId = users[0].id;
-      }
-    }
-  }
-
-  if (userId) {
-    // Update user's plan and save stripe_customer_id
-    await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${userId}`, {
-      method: 'PATCH',
-      headers: {
-        'Authorization': `Bearer ${serviceRoleKey}`,
-        'apikey': serviceRoleKey,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        plan: planId,
-        subscription_status: 'active',
-        subscription_id: session.subscription,
-        stripe_customer_id: session.customer, // Fix: Save the Stripe customer ID
-        subscription_start_date: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      })
-    });
-
-    console.log(`✅ Updated user ${userId} to plan ${planId} with customer ID ${session.customer}`);
-  }
-
-  // Store transaction
-  await fetch(`${supabaseUrl}/rest/v1/stripe_transactions`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${serviceRoleKey}`,
-      'apikey': serviceRoleKey,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      id: session.payment_intent || `checkout_${session.id}`,
-      user_id: userId,
-      customer_id: session.customer,
-      amount: session.amount_total,
-      currency: session.currency,
-      status: 'succeeded',
-      subscription_id: session.subscription,
-      metadata: {
-        ...metadata,
-        checkout_session_id: session.id,
-        type: 'checkout'
-      }
-    })
-  });
-}
-
-async function handlePaymentSucceeded(event: StripeEvent, supabaseUrl: string, serviceRoleKey: string) {
-  const paymentIntent = event.data.object;
-  
-  console.log(`💰 Payment succeeded: ${paymentIntent.id}`);
-  
-  // Store transaction
-  await fetch(`${supabaseUrl}/rest/v1/stripe_transactions`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${serviceRoleKey}`,
-      'apikey': serviceRoleKey,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      id: paymentIntent.id,
-      customer_id: paymentIntent.customer,
-      amount: paymentIntent.amount,
-      currency: paymentIntent.currency,
-      status: paymentIntent.status,
-      payment_method: paymentIntent.payment_method,
-      metadata: paymentIntent.metadata || {}
-    })
-  });
-
-  // Update user subscription if this is a subscription payment
-  const metadata = paymentIntent.metadata || {};
-  if (metadata.user_id && metadata.plan_id) {
-    // Also update stripe_customer_id if available
-    const updateData: any = {
-      plan: metadata.plan_id,
-      subscription_status: 'active',
-      subscription_start_date: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    };
-
-    if (paymentIntent.customer) {
-      updateData.stripe_customer_id = paymentIntent.customer;
-    }
-
-    await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${metadata.user_id}`, {
-      method: 'PATCH',
-      headers: {
-        'Authorization': `Bearer ${serviceRoleKey}`,
-        'apikey': serviceRoleKey,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(updateData)
-    });
-  }
-}
-
-async function handlePaymentFailed(event: StripeEvent, supabaseUrl: string, serviceRoleKey: string) {
-  const paymentIntent = event.data.object;
-  
-  console.log(`❌ Payment failed: ${paymentIntent.id}`);
-  
-  // Store failed transaction
-  await fetch(`${supabaseUrl}/rest/v1/stripe_transactions`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${serviceRoleKey}`,
-      'apikey': serviceRoleKey,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      id: paymentIntent.id,
-      customer_id: paymentIntent.customer,
-      amount: paymentIntent.amount,
-      currency: paymentIntent.currency,
-      status: 'failed',
-      payment_method: paymentIntent.payment_method,
-      metadata: paymentIntent.metadata || {}
-    })
-  });
-}
-
-async function handleSubscriptionChange(event: StripeEvent, supabaseUrl: string, serviceRoleKey: string) {
-  const subscription = event.data.object;
-  
-  console.log(`🔄 Subscription ${event.type}: ${subscription.id}`);
-  
-  // Find user by customer ID
-  const customerResponse = await fetch(
-    `${supabaseUrl}/rest/v1/users?select=id&stripe_customer_id=eq.${subscription.customer}&limit=1`,
-    {
-      headers: {
-        'Authorization': `Bearer ${serviceRoleKey}`,
-        'apikey': serviceRoleKey
-      }
-    }
-  );
-  
-  if (customerResponse.ok) {
-    const users = await customerResponse.json();
-    if (users.length > 0) {
-      const userId = users[0].id;
-      
-      // Map Stripe status to database enum value
-      const mappedStatus = mapStripeStatusToDbStatus(subscription.status);
-      
-      // Update user subscription
-      await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${userId}`, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${serviceRoleKey}`,
-          'apikey': serviceRoleKey,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          subscription_id: subscription.id,
-          subscription_status: mappedStatus,
-          subscription_start_date: new Date(subscription.current_period_start * 1000).toISOString(),
-          subscription_end_date: new Date(subscription.current_period_end * 1000).toISOString(),
-          updated_at: new Date().toISOString()
-        })
-      });
-
-      console.log(`✅ Updated user ${userId} subscription status: ${subscription.status} -> ${mappedStatus}`);
-    }
-  } else {
-    // Fallback: try to find user by customer ID in transactions
-    const transactionResponse = await fetch(
-      `${supabaseUrl}/rest/v1/stripe_transactions?select=user_id&customer_id=eq.${subscription.customer}&limit=1`,
-      {
-        headers: {
-          'Authorization': `Bearer ${serviceRoleKey}`,
-          'apikey': serviceRoleKey
-        }
-      }
-    );
-    
-    if (transactionResponse.ok) {
-      const transactions = await transactionResponse.json();
-      if (transactions.length > 0) {
-        const userId = transactions[0].user_id;
-        
-        // Map Stripe status to database enum value
-        const mappedStatus = mapStripeStatusToDbStatus(subscription.status);
-        
-        // Update user subscription and ensure stripe_customer_id is set
-        await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${userId}`, {
-          method: 'PATCH',
-          headers: {
-            'Authorization': `Bearer ${serviceRoleKey}`,
-            'apikey': serviceRoleKey,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            subscription_id: subscription.id,
-            subscription_status: mappedStatus,
-            stripe_customer_id: subscription.customer, // Ensure customer ID is saved
-            subscription_start_date: new Date(subscription.current_period_start * 1000).toISOString(),
-            subscription_end_date: new Date(subscription.current_period_end * 1000).toISOString(),
-            updated_at: new Date().toISOString()
-          })
-        });
-
-        console.log(`✅ Updated user ${userId} subscription status: ${subscription.status} -> ${mappedStatus}`);
-      }
-    }
-  }
-}
-
-async function handleSubscriptionDeleted(event: StripeEvent, supabaseUrl: string, serviceRoleKey: string) {
-  const subscription = event.data.object;
-  
-  console.log(`🗑️ Subscription deleted: ${subscription.id}`);
-  
-  // Find user by subscription ID
-  const userResponse = await fetch(
-    `${supabaseUrl}/rest/v1/users?select=id&subscription_id=eq.${subscription.id}&limit=1`,
-    {
-      headers: {
-        'Authorization': `Bearer ${serviceRoleKey}`,
-        'apikey': serviceRoleKey
-      }
-    }
-  );
-  
-  if (userResponse.ok) {
-    const users = await userResponse.json();
-    if (users.length > 0) {
-      const userId = users[0].id;
-      
-      // Get free plan UUID from database
-      const planResponse = await fetch(
-        `${supabaseUrl}/rest/v1/plans?select=id&is_free=eq.true&is_active=eq.true&limit=1`,
-        {
-          headers: {
-            'Authorization': `Bearer ${serviceRoleKey}`,
-            'apikey': serviceRoleKey
-          }
-        }
-      );
-      
-      let freePlanId = null; // Changed from hardcoded string to null
-      if (planResponse.ok) {
-        const plans = await planResponse.json();
-        if (plans.length > 0) {
-          freePlanId = plans[0].id; // Use the actual UUID from database
-          console.log(`✅ Found free plan: ${freePlanId}`);
-        } else {
-          console.error('❌ No free plan found in database! Please configure a free plan in Super Admin.');
-        }
-      } else {
-        console.error('❌ Failed to fetch free plan from database');
-      }
-      
-      // Downgrade user to free plan (or null if no free plan exists)
-      await fetch(`${supabaseUrl}/rest/v1/users?id=eq.${userId}`, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${serviceRoleKey}`,
-          'apikey': serviceRoleKey,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          plan: freePlanId, // Will be UUID or null
-          subscription_status: 'canceled',
-          subscription_canceled_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
-        })
-      });
-
-      if (freePlanId) {
-        console.log(`✅ User ${userId} downgraded to free plan: ${freePlanId}`);
-      } else {
-        console.log(`⚠️ User ${userId} plan set to null - no free plan available`);
-      }
-    }
-  }
-}
-
-async function handleInvoicePaymentSucceeded(event: StripeEvent, supabaseUrl: string, serviceRoleKey: string) {
-  const invoice = event.data.object;
-  
-  console.log(`📄 Invoice payment succeeded: ${invoice.id}`);
-  
-  // Store transaction for invoice payment
-  await fetch(`${supabaseUrl}/rest/v1/stripe_transactions`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${serviceRoleKey}`,
-      'apikey': serviceRoleKey,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      id: `inv_${invoice.id}`,
-      customer_id: invoice.customer,
-      amount: invoice.amount_paid,
-      currency: invoice.currency,
-      status: 'succeeded',
-      subscription_id: invoice.subscription,
-      metadata: { invoice_id: invoice.id, type: 'invoice' }
-    })
-  });
-}
